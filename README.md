@@ -2,7 +2,7 @@
 
 一个面向文档、图片、音频和视频资料的多模态检索增强生成（RAG）系统方案。项目目标是将非结构化资料统一解析为带有来源、页码或时间轴信息的 Chunk，通过混合检索与重排序召回可靠上下文，再由大模型生成可追溯的流式回答。
 
-> 当前状态：项目处于方案落地阶段。成员 C 的检索、重排、流式生成、结构化引用和评估基线已实现，数据解析、后端 API、前端和部署模块将按里程碑继续接入。
+> 当前状态：项目处于方案落地阶段。成员 B 已完成统一 Chunk 数据契约、文档/图片/音视频切片对齐和批量向量入库边界；成员 C 的检索、重排、流式生成、结构化引用和评估基线已实现，后端 API、前端和部署模块将按里程碑继续接入。
 
 ## 项目目标
 
@@ -31,7 +31,7 @@
 | 前端与交互 | 知识库管理、文件上传、解析进度、对话与引用播放 | React/Vite/TypeScript 或 Vue3/Vite |
 | 后端 API | 用户、文件、知识库、任务、对话和 Chunk 溯源接口 | FastAPI、分层架构、SSE |
 | 异步任务 | 文档解析、媒体处理、向量化和重试 | Celery + Redis；评估 Dramatiq/arq |
-| 数据处理 | PDF/Word/图片/音视频解析、清洗、切片和多模态对齐 | PyMuPDF、Unstructured、FFmpeg、Whisper、OCR |
+| 数据处理 | PDF/Word/图片/音视频解析、清洗、切片和多模态对齐 | `ingestion/` 契约层；可接 PyMuPDF、Unstructured、FFmpeg、Whisper、OCR |
 | 向量与检索 | Embedding、向量入库、向量检索、BM25、RRF | Qdrant（优先）或 Milvus、BGE/CLIP 系列 |
 | 生成与评估 | Query 改写、Rerank、Prompt、流式生成、效果评估 | bge-reranker、可配置的大模型 API |
 | 基础设施 | 关系数据、对象存储、服务编排与部署 | MySQL、MinIO、Docker Compose |
@@ -157,6 +157,20 @@ python -m unittest discover -s tests -v
 
 成员 B 的数据解析、切片、时间对齐与向量入库接入说明见
 [`docs/member-b-data.md`](./docs/member-b-data.md)。
+
+## 成员 B 数据模块
+
+成员 B 的实现位于 `ingestion/`，与成员 C 的 `rag_engine` 通过统一的
+`rag_engine.models.Chunk` 对接：
+
+- `chunk_document`：保留页码、标题层级，并按重叠窗口切分文档块；
+- `image_chunk`：将图片描述和原图路径封装为可检索 Chunk；
+- `chunk_media`：按时间窗融合 ASR 文本和视频帧描述，保留可回溯时间段；
+- `embed_and_upsert`：批量校验 embedding，并通过 `QdrantVectorWriter` 写入向量库。
+
+这些接口不强绑定具体 PDF/OCR/ASR/VLM 服务，上游解析器只需产出
+`DocumentBlock`、`TranscriptSegment` 和 `FrameDescription` 即可接入。生成的
+Chunk 可直接被 C 的 BM25/混合检索和 `QdrantVectorRetriever` 消费。
 
 ## 文档
 
