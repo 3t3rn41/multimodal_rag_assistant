@@ -22,7 +22,7 @@ all = [
 dev = ["pytest>=8.0"]
 
 [tool.setuptools.packages.find]
-include = ["rag_engine*"]
+include = ["rag_engine*", "ingestion*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

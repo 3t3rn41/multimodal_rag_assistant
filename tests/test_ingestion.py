@@ -8,6 +8,7 @@ from ingestion import (
     chunk_media,
     image_chunk,
 )
+from rag_engine.retrieval import BM25Retriever
 
 
 class DocumentChunkingTests(unittest.TestCase):
@@ -43,6 +44,16 @@ class DocumentChunkingTests(unittest.TestCase):
         self.assertEqual(chunk.source_type, "image")
         self.assertEqual(chunk.media_path, "minio://raw-files/diagram.png")
         self.assertEqual(chunk.extra["modality"], "image")
+
+    def test_document_chunks_are_ready_for_c_retrieval(self) -> None:
+        chunks = chunk_document(
+            "manual.pdf",
+            [DocumentBlock("Redis 任务队列配置", page=3)],
+        )
+
+        results = BM25Retriever(chunks).search("Redis 队列", top_k=1)
+
+        self.assertEqual(results[0].chunk_id, chunks[0].chunk_id)
 
     def test_media_chunks_fuse_transcript_and_frames_by_time_window(self) -> None:
         transcripts = [

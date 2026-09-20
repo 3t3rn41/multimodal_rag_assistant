@@ -155,6 +155,9 @@ celery-worker · celery-beat（按需启用）
 python -m unittest discover -s tests -v
 ```
 
+成员 B 的数据解析、切片、时间对齐与向量入库接入说明见
+[`docs/member-b-data.md`](./docs/member-b-data.md)。
+
 ## 文档
 
 - [项目分工详细说明书](./项目分工详细说明书.md)：角色职责、接口边界、技术选型和交付物的完整说明。

@@ -51,6 +51,18 @@ class EmbeddingTests(unittest.TestCase):
         self.assertEqual(writer.batches[0][0].to_payload()["content"], "第一段")
         self.assertEqual(writer.batches[0][0].embedding, (3.0, 1.0))
 
+    def test_payload_round_trip_is_compatible_with_c_model(self) -> None:
+        chunk = embed_chunks(
+            [Chunk("c1", "doc.pdf", "document", "第一段", page=3)],
+            FakeEmbedder(),
+        )[0]
+
+        restored = Chunk.from_payload(chunk.to_payload(include_embedding=True))
+
+        self.assertEqual(restored.chunk_id, "c1")
+        self.assertEqual(restored.page, 3)
+        self.assertEqual(restored.embedding, (3.0, 1.0))
+
     def test_embedding_provider_result_length_must_match_batch(self) -> None:
         class ShortEmbedder:
             def embed(self, texts: list[str]) -> list[list[float]]:
