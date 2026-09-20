@@ -1,6 +1,6 @@
 import unittest
 
-from ingestion import embed_and_upsert, embed_chunks
+from ingestion import embed_and_upsert, embed_chunks, index_chunks
 from rag_engine.models import Chunk
 
 
@@ -16,6 +16,21 @@ class RecordingWriter:
     def upsert(self, chunks: tuple[Chunk, ...]) -> int:
         self.batches.append(chunks)
         return len(chunks)
+
+
+class ResumableWriter(RecordingWriter):
+    def __init__(self, existing: set[str]) -> None:
+        super().__init__()
+        self.existing = set(existing)
+
+    def existing_chunk_ids(self, chunks: tuple[Chunk, ...] | list[Chunk]) -> set[str]:
+        requested = {chunk.chunk_id for chunk in chunks}
+        return requested & self.existing
+
+    def upsert(self, chunks: tuple[Chunk, ...]) -> int:
+        count = super().upsert(chunks)
+        self.existing.update(chunk.chunk_id for chunk in chunks)
+        return count
 
 
 class EmbeddingTests(unittest.TestCase):
@@ -70,6 +85,35 @@ class EmbeddingTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             embed_chunks([Chunk("c1", "doc.pdf", "document", "文本")], ShortEmbedder())
+
+    def test_index_chunks_skips_existing_and_verifies_consistency(self) -> None:
+        chunks = [
+            Chunk("c1", "doc.pdf", "document", "第一段"),
+            Chunk("c2", "doc.pdf", "document", "第二段"),
+            Chunk("c3", "doc.pdf", "document", "第三段"),
+        ]
+        writer = ResumableWriter({"c1"})
+
+        report = index_chunks(chunks, FakeEmbedder(), writer, batch_size=1)
+
+        self.assertEqual(report.total, 3)
+        self.assertEqual(report.skipped, 1)
+        self.assertEqual(report.embedded, 2)
+        self.assertEqual(report.upserted, 2)
+        self.assertEqual([batch[0].chunk_id for batch in writer.batches], ["c2", "c3"])
+
+    def test_index_chunks_fails_when_writer_cannot_confirm_all_chunks(self) -> None:
+        class BrokenWriter(ResumableWriter):
+            def upsert(self, chunks: tuple[Chunk, ...]) -> int:
+                self.batches.append(chunks)
+                return len(chunks)
+
+        with self.assertRaisesRegex(RuntimeError, "consistency check failed"):
+            index_chunks(
+                [Chunk("c1", "doc.pdf", "document", "第一段")],
+                FakeEmbedder(),
+                BrokenWriter(set()),
+            )
 
 
 if __name__ == "__main__":
