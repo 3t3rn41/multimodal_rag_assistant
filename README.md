@@ -32,7 +32,7 @@
 | 后端 API | 用户、文件、知识库、任务、对话和 Chunk 溯源接口 | FastAPI、分层架构、SSE |
 | 异步任务 | 文档解析、媒体处理、向量化和重试 | Celery + Redis；评估 Dramatiq/arq |
 | 数据处理 | PDF/Word/图片/音视频解析、清洗、切片和多模态对齐 | `ingestion/` 契约层；可接 PyMuPDF、Unstructured、FFmpeg、Whisper、OCR |
-| 向量与检索 | Embedding、向量入库、向量检索、BM25、RRF | Qdrant（优先）或 Milvus、BGE/CLIP 系列 |
+| 向量与检索 | API 多模态 Embedding、向量入库、向量检索、BM25、RRF | Qdrant（优先）或 Milvus；Embedding 由外部图文 API 提供 |
 | 生成与评估 | Query 改写、Rerank、Prompt、流式生成、效果评估 | bge-reranker、可配置的大模型 API |
 | 基础设施 | 关系数据、对象存储、服务编排与部署 | MySQL、MinIO、Docker Compose |
 
@@ -158,6 +158,13 @@ python -m unittest discover -s tests -v
 成员 B 的数据解析、切片、时间对齐与向量入库接入说明见
 [`docs/member-b-data.md`](./docs/member-b-data.md)。
 
+成员 B 的向量化实现是 API-only：不会在本地下载或加载 Embedding 模型。复制
+[`.env.example`](./.env.example) 并填写 `RAG_EMBEDDING_API_URL`、
+`RAG_EMBEDDING_API_KEY`、模型名和维度后，可用
+`python -m scripts.index_chunks` 批量写入 Qdrant；中断重跑会按 `chunk_id` 跳过已入库数据。
+模型比较和输入路由规则见
+[`docs/embedding-model-selection.md`](./docs/embedding-model-selection.md)。
+
 ## 成员 B 数据模块
 
 成员 B 的实现位于 `ingestion/`，与成员 C 的 `rag_engine` 通过统一的
@@ -166,7 +173,8 @@ python -m unittest discover -s tests -v
 - `chunk_document`：保留页码、标题层级，并按重叠窗口切分文档块；
 - `image_chunk`：将图片描述和原图路径封装为可检索 Chunk；
 - `chunk_media`：按时间窗融合 ASR 文本和视频帧描述，保留可回溯时间段；
-- `embed_and_upsert`：批量校验 embedding，并通过 `QdrantVectorWriter` 写入向量库。
+- `ApiMultimodalEmbedder`：通过外部图文 Embedding API 统一处理文本、图片和视频代表帧；
+- `index_chunks`：批量校验向量、支持断点续传，并通过 `QdrantVectorWriter` 写入向量库。
 
 这些接口不强绑定具体 PDF/OCR/ASR/VLM 服务，上游解析器只需产出
 `DocumentBlock`、`TranscriptSegment` 和 `FrameDescription` 即可接入。生成的

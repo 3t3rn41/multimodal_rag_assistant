@@ -1,8 +1,10 @@
 # 成员 B：数据解析、切片与向量入库
 
-成员 B 的基础实现位于 `ingestion/`，输出直接复用成员 C 的
+成员 B 的实现位于 `ingestion/`，输出直接复用成员 C 的
 `rag_engine.models.Chunk`，因此不需要改动 `BM25Retriever`、`HybridRetriever`
-或 `QdrantVectorRetriever`。
+或 `QdrantVectorRetriever`。Embedding 不在本地加载模型，统一调用由环境变量
+配置的多模态 API，示例配置见 `.env.example`，模型取舍见
+[`embedding-model-selection.md`](./embedding-model-selection.md)。
 
 ## 与成员 C 的契约
 
@@ -41,17 +43,38 @@ chunks = chunk_media(
 )
 ```
 
-真正的 PDF/OCR/Whisper/VLM 适配器可以独立接在这些输入类型之前；这样可在不
-引入重量级依赖的情况下测试切片、对齐和 C 的检索链路。
+`PyMuPDFParser`、`DocxParser`、`FFmpegMediaExtractor`、`ApiTranscriber` 和
+`ApiImageCaptioner` 已提供适配边界；PDF 解析依赖可选的 PyMuPDF，音视频依赖系统
+FFmpeg，转写和图片描述依赖你填写的 API。这样切片/对齐测试不需要下载模型，也不
+会把真实 Token 写入仓库。
 
 ## 向量化入库
 
 ```python
-from ingestion import QdrantVectorWriter, embed_and_upsert
+from ingestion import (
+    ApiMultimodalEmbedder,
+    MultimodalEmbeddingAPIConfig,
+    QdrantVectorWriter,
+    index_chunks,
+)
 
+provider = ApiMultimodalEmbedder(MultimodalEmbeddingAPIConfig.from_env())
 writer = QdrantVectorWriter(client, "chunks", vector_name="dense")
-embed_and_upsert(chunks, embedding_provider, writer, batch_size=64)
+report = index_chunks(chunks, provider, writer, batch_size=64)
 ```
 
-`embedding_provider` 只需实现 `embed(texts)`，返回与输入数量一致的向量。批次
-内和批次间维度不一致、空向量、非有限值都会在写入前被拒绝。
+生产路径固定使用 API provider；测试可以注入假的 transport，不需要下载模型。
+批次内和批次间维度不一致、空向量、非有限值都会在写入前被拒绝，`report` 会记录
+总数、跳过数、实际向量化数和写入数。
+
+生产 API 入口是 `ApiMultimodalEmbedder`：文档和音频发送文本，图片和视频发送
+融合文本及可访问的图片 URL；私有 `minio://` 路径必须由应用层转换为短时
+presigned HTTPS URL。`scripts/index_chunks.py` 支持已入库 Chunk 跳过、批量写入
+和结束后的一致性检查：
+
+```bash
+python -m scripts.index_chunks --chunks chunks.jsonl
+```
+
+`evaluation/ingestion_samples.jsonl` 提供文档、表格、图片、音频、视频和纯画面
+场景的最小质量样例，测试会校验这些样例都能产出完整 Chunk 元数据。
