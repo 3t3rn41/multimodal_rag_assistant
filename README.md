@@ -2,7 +2,7 @@
 
 一个面向文档、图片、音频和视频资料的多模态检索增强生成（RAG）系统方案。项目目标是将非结构化资料统一解析为带有来源、页码或时间轴信息的 Chunk，通过混合检索与重排序召回可靠上下文，再由大模型生成可追溯的流式回答。
 
-> 当前状态：项目处于方案落地与工程骨架阶段。仓库目前包含项目分工说明和本 README，业务代码、部署文件及测试集将按里程碑逐步实现。
+> 当前状态：项目处于方案落地阶段。成员 C 的检索、重排、流式生成、结构化引用和评估基线已实现，数据解析、后端 API、前端和部署模块将按里程碑继续接入。
 
 ## 项目目标
 
@@ -137,6 +137,23 @@ celery-worker · celery-beat（按需启用）
 ## 评估指标
 
 项目将覆盖检索准确率（Precision）、召回率（Recall）、命中率（Hit Rate）、回答忠实度（Faithfulness）和引用准确率等指标。评估集计划覆盖文本、图片、视频及混合问题，并记录标准答案与期望引用来源。
+
+## 成员 C 算法模块
+
+成员 C 的第一版实现位于 `rag_engine/`，包括：
+
+- BM25 + 向量检索 + 加权 RRF 混合召回；
+- Qdrant `query_points` 适配器；
+- `BAAI/bge-reranker-v2-m3` CrossEncoder Rerank 适配器；
+- OpenAI-compatible 多厂商流式模型适配；
+- 可信 Chunk 白名单校验与结构化引用；
+- 评估数据集、Precision/Recall/Hit Rate/MRR/Citation Accuracy 指标和回归脚本。
+
+详细接入说明见 [`docs/member-c-rag.md`](./docs/member-c-rag.md)，基础测试可运行：
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## 文档
 
