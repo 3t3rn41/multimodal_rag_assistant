@@ -1,15 +1,24 @@
 import unittest
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 from ingestion import (
     DocumentBlock,
+    QdrantVectorWriter,
     chunk_document,
     embed_and_upsert,
     embed_chunks,
+    ensure_qdrant_collection,
     index_chunks,
 )
 from ingestion.embedding import _qdrant_point_id
+from ingestion.retry import RetryPolicy
 from rag_engine.models import Chunk
+
+try:
+    from qdrant_client import models as qdrant_models
+except ImportError:  # pragma: no cover - optional test dependency
+    qdrant_models = None
 
 
 class FakeEmbedder:
@@ -145,6 +154,123 @@ class EmbeddingTests(unittest.TestCase):
                 [Chunk("c1", "doc.pdf", "document", "第一段")],
                 FakeEmbedder(),
                 BrokenWriter(set()),
+            )
+
+    @unittest.skipUnless(qdrant_models is not None, "qdrant-client is optional")
+    def test_qdrant_upsert_retries_transient_connection_errors(self) -> None:
+        class FlakyClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def upsert(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ConnectionError("temporary qdrant outage")
+                return None
+
+        client = FlakyClient()
+        waits: list[float] = []
+        writer = QdrantVectorWriter(
+            client,
+            "jina_v5_omni_small_1024",
+            vector_name="dense",
+            retry_policy=RetryPolicy(max_retries=1, backoff_seconds=0),
+            sleeper=waits.append,
+        )
+        chunk = Chunk(
+            "c1",
+            "doc.pdf",
+            "document",
+            "内容",
+            embedding=(0.1, 0.2),
+            extra={"qdrant_point_id": str(uuid4())},
+        )
+
+        self.assertEqual(writer.upsert([chunk]), 1)
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(waits, [0])
+
+    @unittest.skipUnless(qdrant_models is not None, "qdrant-client is optional")
+    def test_existing_qdrant_collection_schema_is_validated(self) -> None:
+        vectors = {
+            "dense": qdrant_models.VectorParams(
+                size=1024,
+                distance=qdrant_models.Distance.COSINE,
+            )
+        }
+
+        class ExistingClient:
+            def collection_exists(self, **kwargs):
+                return True
+
+            def get_collection(self, **kwargs):
+                return SimpleNamespace(
+                    config=SimpleNamespace(
+                        params=SimpleNamespace(vectors=vectors),
+                    )
+                )
+
+        ensure_qdrant_collection(
+            ExistingClient(),
+            "jina_v5_omni_small_1024",
+            1024,
+            vector_name="dense",
+        )
+
+    @unittest.skipUnless(qdrant_models is not None, "qdrant-client is optional")
+    def test_existing_qdrant_collection_dimension_mismatch_fails_early(self) -> None:
+        vectors = {
+            "dense": qdrant_models.VectorParams(
+                size=768,
+                distance=qdrant_models.Distance.COSINE,
+            )
+        }
+
+        class ExistingClient:
+            def collection_exists(self, **kwargs):
+                return True
+
+            def get_collection(self, **kwargs):
+                return SimpleNamespace(
+                    config=SimpleNamespace(
+                        params=SimpleNamespace(vectors=vectors),
+                    )
+                )
+
+        with self.assertRaisesRegex(ValueError, "dimensions"):
+            ensure_qdrant_collection(
+                ExistingClient(),
+                "jina_v5_omni_small_1024",
+                1024,
+                vector_name="dense",
+            )
+
+    @unittest.skipUnless(qdrant_models is not None, "qdrant-client is optional")
+    def test_existing_qdrant_collection_named_vector_mismatch_fails_early(self) -> None:
+        vectors = {
+            "default": qdrant_models.VectorParams(
+                size=1024,
+                distance=qdrant_models.Distance.COSINE,
+            )
+        }
+
+        class ExistingClient:
+            def collection_exists(self, **kwargs):
+                return True
+
+            def get_collection(self, **kwargs):
+                return SimpleNamespace(
+                    config=SimpleNamespace(
+                        params=SimpleNamespace(vectors=vectors),
+                    )
+                )
+
+        with self.assertRaisesRegex(ValueError, "named vector"):
+            ensure_qdrant_collection(
+                ExistingClient(),
+                "jina_v5_omni_small_1024",
+                1024,
+                vector_name="dense",
             )
 
 

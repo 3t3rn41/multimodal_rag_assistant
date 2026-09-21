@@ -1,15 +1,18 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ingestion.media import (
     ApiImageCaptioner,
     ApiTranscriber,
     FrameSample,
+    HttpxMultipartTransport,
     MediaAPIConfig,
     VideoIngestionPipeline,
     ingest_audio,
 )
+from ingestion.retry import RetryPolicy
 from ingestion.types import TranscriptSegment
 
 
@@ -137,6 +140,35 @@ class MediaPipelineTests(unittest.TestCase):
         self.assertIn("打开配置文件", chunks[0].content)
         self.assertEqual(chunks[0].extra["source_media_path"], "clips/clip-2-9.mp3")
 
+    def test_media_pipeline_can_resolve_clips_to_remote_references(self) -> None:
+        extractor = FakeExtractor()
+        pipeline = VideoIngestionPipeline(
+            extractor,
+            FakeTranscriber(),
+            FakeCaptioner(),
+            media_ref_resolver=lambda path: f"minio://clips/{path.name}",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            chunks = pipeline.ingest(
+                Path("demo.mp4"),
+                file_id="video-1",
+                work_dir=Path(directory),
+            )
+
+        self.assertEqual(
+            chunks[0].extra["source_media_path"],
+            "minio://clips/clip-2-9.mp4",
+        )
+        self.assertEqual(
+            chunks[0].media_path,
+            "minio://clips/frame_000001.jpg",
+        )
+        self.assertEqual(
+            chunks[0].extra["frame_paths"],
+            ["minio://clips/frame_000001.jpg"],
+        )
+
     def test_transcription_and_caption_clients_use_configured_apis(self) -> None:
         config = MediaAPIConfig(
             transcription_url="https://api.example/transcriptions",
@@ -167,6 +199,36 @@ class MediaPipelineTests(unittest.TestCase):
         self.assertEqual(caption, "一张系统架构图")
         content = json_transport.calls[0]["payload"]["messages"][0]["content"]
         self.assertEqual(content[1]["image_url"]["url"], "https://cdn.example/frame.jpg")
+
+    def test_multipart_transport_retries_transient_http_failures(self) -> None:
+        try:
+            import httpx
+        except ImportError:  # pragma: no cover - optional dependency
+            self.skipTest("httpx is optional")
+
+        request = httpx.Request("POST", "https://api.example/transcriptions")
+        responses = [
+            httpx.Response(503, request=request),
+            httpx.Response(200, json={"segments": []}, request=request),
+        ]
+        waits: list[float] = []
+        transport = HttpxMultipartTransport(
+            policy=RetryPolicy(max_retries=1, backoff_seconds=0),
+            sleeper=waits.append,
+        )
+        with tempfile.NamedTemporaryFile() as audio_file:
+            with patch("httpx.post", side_effect=responses) as post:
+                result = transport.post_file(
+                    "https://api.example/transcriptions",
+                    headers={},
+                    data={"model": "whisper"},
+                    file_path=Path(audio_file.name),
+                    timeout=5,
+                )
+
+        self.assertEqual(result, {"segments": []})
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(waits, [0])
 
 
 if __name__ == "__main__":
