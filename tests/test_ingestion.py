@@ -81,6 +81,21 @@ class DocumentChunkingTests(unittest.TestCase):
         self.assertEqual(chunks[1].time_start, 30)
         self.assertEqual(chunks[1].media_path, "frames/34.jpg")
 
+    def test_cross_window_transcript_is_not_duplicated_and_citation_is_precise(self) -> None:
+        chunks = chunk_media(
+            "demo.mp4",
+            [TranscriptSegment(29, 31, "跨过窗口边界的一句转写")],
+            [],
+            window_seconds=30,
+        )
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].content.count("跨过窗口边界的一句转写"), 1)
+        self.assertEqual(chunks[0].time_start, 29)
+        self.assertEqual(chunks[0].time_end, 31)
+        self.assertEqual(chunks[0].extra["window_start"], 0)
+        self.assertEqual(chunks[0].extra["window_end"], 30)
+
     def test_invalid_media_intervals_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
             TranscriptSegment(10, 10, "没有有效时长")
