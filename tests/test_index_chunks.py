@@ -11,6 +11,7 @@ class IndexCommandTests(unittest.TestCase):
         self.assertTrue(args.rebuild)
         self.assertEqual(args.collection, "jina_v5_omni_small_1024")
         self.assertEqual(args.embedding_dimensions, 1024)
+        self.assertIsNone(args.qdrant_path)
 
 
 if __name__ == "__main__":
