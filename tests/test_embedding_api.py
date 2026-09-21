@@ -44,37 +44,45 @@ def config() -> MultimodalEmbeddingAPIConfig:
         api_key="test-token",
         model="multimodal-model",
         dimensions=2,
+        passage_task="retrieval.passage",
+        query_task="retrieval.query",
         timeout_seconds=12,
     )
 
 
 class ApiMultimodalEmbedderTests(unittest.TestCase):
-    def test_from_env_requires_api_key(self) -> None:
+    def test_from_env_uses_jina_key_and_tasks(self) -> None:
         with self.assertRaises(ValueError):
             MultimodalEmbeddingAPIConfig.from_env({})
 
         loaded = MultimodalEmbeddingAPIConfig.from_env(
             {
                 "RAG_EMBEDDING_API_KEY": "",
-                "SILICONFLOW_API_KEY": "secret",
+                "JINA_API_KEY": "secret",
                 "RAG_EMBEDDING_API_URL": "https://example.test/embed",
-                "RAG_EMBEDDING_MODEL": "Qwen/Qwen3-VL-Embedding-8B",
+                "RAG_EMBEDDING_MODEL": "jina-embeddings-v5-omni-small",
+                "RAG_EMBEDDING_PASSAGE_TASK": "retrieval.passage",
+                "RAG_EMBEDDING_QUERY_TASK": "retrieval.query",
             }
         )
         self.assertEqual(loaded.api_key, "secret")
-        self.assertEqual(loaded.model, "Qwen/Qwen3-VL-Embedding-8B")
+        self.assertEqual(loaded.model, "jina-embeddings-v5-omni-small")
+        self.assertEqual(loaded.passage_task, "retrieval.passage")
+        self.assertEqual(loaded.query_task, "retrieval.query")
         self.assertIsNone(loaded.dimensions)
 
     def test_chunks_use_text_and_media_in_one_embedding_space(self) -> None:
-        # Inputs are: document text, image text, image URL, audio text,
-        # video text, representative video frame.
+        # Inputs are: document text, image text/image, audio text/audio,
+        # video text/raw video/representative frame.
         transport = RecordingTransport(
             [
                 [1, 0],
                 [1, 0],
                 [0, 1],
                 [2, 0],
+                [0, 1],
                 [1, 0],
+                [0, 1],
                 [0, 1],
             ]
         )
@@ -88,13 +96,20 @@ class ApiMultimodalEmbedderTests(unittest.TestCase):
                 "系统架构图",
                 media_path="https://cdn.example/diagram.png",
             ),
-            Chunk("audio", "lesson.mp3", "audio", "音频转写内容"),
+            Chunk(
+                "audio",
+                "lesson.mp3",
+                "audio",
+                "音频转写内容",
+                extra={"source_media_path": "https://cdn.example/lesson.mp3"},
+            ),
             Chunk(
                 "video",
                 "demo.mp4",
                 "video",
                 "语音和画面融合内容",
                 media_path="https://cdn.example/frame.jpg",
+                extra={"source_media_path": "https://cdn.example/demo.mp4"},
             ),
         ]
 
@@ -110,9 +125,7 @@ class ApiMultimodalEmbedderTests(unittest.TestCase):
         self.assertEqual(payload["model"], "multimodal-model")
         self.assertEqual(payload["dimensions"], 2)
         self.assertEqual(payload["encoding_format"], "float")
-        self.assertNotIn("task", payload)
-        self.assertNotIn("normalized", payload)
-        self.assertNotIn("embedding_type", payload)
+        self.assertEqual(payload["task"], "retrieval.passage")
         self.assertEqual(
             payload["input"],
             [
@@ -120,7 +133,9 @@ class ApiMultimodalEmbedderTests(unittest.TestCase):
                 {"text": "系统架构图"},
                 {"image": "https://cdn.example/diagram.png"},
                 {"text": "音频转写内容"},
+                {"audio": "https://cdn.example/lesson.mp3"},
                 {"text": "语音和画面融合内容"},
+                {"video": "https://cdn.example/demo.mp4"},
                 {"image": "https://cdn.example/frame.jpg"},
             ],
         )
@@ -136,6 +151,10 @@ class ApiMultimodalEmbedderTests(unittest.TestCase):
         self.assertEqual(
             transport.calls[0]["payload"]["input"],
             [{"text": "视频里讲了什么？"}],
+        )
+        self.assertEqual(
+            transport.calls[0]["payload"]["task"],
+            "retrieval.query",
         )
 
     def test_non_http_media_can_be_resolved_to_presigned_url(self) -> None:
@@ -160,6 +179,46 @@ class ApiMultimodalEmbedderTests(unittest.TestCase):
         self.assertEqual(
             transport.calls[0]["payload"]["input"][1],
             {"image": "https://storage.example/diagram.png"},
+        )
+
+    def test_audio_and_video_paths_can_be_resolved_to_jina_inputs(self) -> None:
+        transport = RecordingTransport([[1, 0], [0, 1], [1, 1]])
+        provider = ApiMultimodalEmbedder(
+            config(),
+            transport=transport,
+            media_url_resolver=lambda value: value.replace(
+                "minio://raw-files/", "https://storage.example/"
+            ),
+        )
+        chunks = [
+            Chunk(
+                "audio",
+                "lesson.mp3",
+                "audio",
+                "音频",
+                extra={"source_media_path": "minio://raw-files/lesson.mp3"},
+            ),
+            Chunk(
+                "video",
+                "demo.mp4",
+                "video",
+                "视频",
+                media_path="minio://raw-files/frame.jpg",
+                extra={"source_media_path": "minio://raw-files/demo.mp4"},
+            ),
+        ]
+
+        provider.embed_chunks(chunks)
+
+        self.assertEqual(
+            transport.calls[0]["payload"]["input"],
+            [
+                {"text": "音频"},
+                {"audio": "https://storage.example/lesson.mp3"},
+                {"text": "视频"},
+                {"video": "https://storage.example/demo.mp4"},
+                {"image": "https://storage.example/frame.jpg"},
+            ],
         )
 
     def test_invalid_api_response_is_rejected(self) -> None:

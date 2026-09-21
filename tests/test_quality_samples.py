@@ -15,7 +15,10 @@ from ingestion import (
 class IngestionQualitySampleTests(unittest.TestCase):
     def test_all_quality_samples_produce_contract_complete_chunks(self) -> None:
         sample_path = Path(__file__).parents[1] / "evaluation" / "ingestion_samples.jsonl"
-        rows = [json.loads(line) for line in sample_path.read_text().splitlines()]
+        rows = [
+            json.loads(line)
+            for line in sample_path.read_text(encoding="utf-8").splitlines()
+        ]
 
         self.assertEqual({row["source_type"] for row in rows}, {"document", "image", "audio", "video"})
         for row in rows:

@@ -1,6 +1,14 @@
 import unittest
+from uuid import UUID, uuid4
 
-from ingestion import embed_and_upsert, embed_chunks, index_chunks
+from ingestion import (
+    DocumentBlock,
+    chunk_document,
+    embed_and_upsert,
+    embed_chunks,
+    index_chunks,
+)
+from ingestion.embedding import _qdrant_point_id
 from rag_engine.models import Chunk
 
 
@@ -34,6 +42,30 @@ class ResumableWriter(RecordingWriter):
 
 
 class EmbeddingTests(unittest.TestCase):
+    def test_ingestion_persists_a_random_qdrant_uuid(self) -> None:
+        chunk = chunk_document(
+            "doc.pdf",
+            [DocumentBlock("内容")],
+        )[0]
+
+        point_id = UUID(str(chunk.extra["qdrant_point_id"]))
+
+        self.assertEqual(str(point_id), chunk.extra["qdrant_point_id"])
+
+    def test_qdrant_point_id_requires_an_upstream_persisted_uuid(self) -> None:
+        persisted = str(uuid4())
+        chunk = Chunk(
+            "not-a-uuid",
+            "doc.pdf",
+            "document",
+            "内容",
+            extra={"qdrant_point_id": persisted},
+        )
+        self.assertEqual(_qdrant_point_id(chunk), persisted)
+
+        with self.assertRaisesRegex(ValueError, "persisted UUID"):
+            _qdrant_point_id(Chunk("arbitrary-id", "doc.pdf", "document", "内容"))
+
     def test_embed_chunks_returns_c_compatible_chunks(self) -> None:
         chunks = [
             Chunk("c1", "doc.pdf", "document", "第一段"),
