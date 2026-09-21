@@ -14,6 +14,20 @@ from ingestion.types import TranscriptSegment
 
 
 class FakeExtractor:
+    def clip_media(
+        self,
+        media_path: Path,
+        output_dir: Path,
+        *,
+        start_seconds: float,
+        end_seconds: float,
+    ) -> Path:
+        self.clip_requests = getattr(self, "clip_requests", [])
+        self.clip_requests.append(
+            (media_path, output_dir, start_seconds, end_seconds)
+        )
+        return output_dir / f"clip-{start_seconds:g}-{end_seconds:g}{media_path.suffix}"
+
     def extract_audio(self, video_path: Path, output_dir: Path) -> Path:
         self.audio_request = (video_path, output_dir)
         return output_dir / "audio.wav"
@@ -94,21 +108,34 @@ class MediaPipelineTests(unittest.TestCase):
         self.assertIn("打开配置文件", chunks[0].content)
         self.assertIn("frame_000001", chunks[0].content)
         self.assertEqual(chunks[1].time_start, 31)
-        self.assertEqual(chunks[0].extra["source_media_path"], "demo.mp4")
+        self.assertEqual(
+            chunks[0].extra["source_media_path"],
+            "clip-2-9.mp4",
+        )
+        self.assertEqual(
+            extractor.clip_requests,
+            [
+                (Path("demo.mp4"), Path(chunks[0].extra["source_media_path"]).parent, 2, 9),
+                (Path("demo.mp4"), Path(chunks[1].extra["source_media_path"]).parent, 31, 38),
+            ],
+        )
 
     def test_audio_pipeline_preserves_transcript_timestamps(self) -> None:
+        clipper = FakeExtractor()
         chunks = ingest_audio(
             Path("lesson.mp3"),
             file_id="audio-1",
             transcriber=FakeTranscriber(),
             window_seconds=30,
+            media_clipper=clipper,
+            work_dir=Path("clips"),
         )
 
         self.assertEqual([chunk.source_type for chunk in chunks], ["audio", "audio"])
         self.assertEqual(chunks[0].time_start, 2)
         self.assertEqual(chunks[0].time_end, 9)
         self.assertIn("打开配置文件", chunks[0].content)
-        self.assertEqual(chunks[0].extra["source_media_path"], "lesson.mp3")
+        self.assertEqual(chunks[0].extra["source_media_path"], "clips/clip-2-9.mp3")
 
     def test_transcription_and_caption_clients_use_configured_apis(self) -> None:
         config = MediaAPIConfig(

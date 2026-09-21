@@ -46,6 +46,8 @@ def config() -> MultimodalEmbeddingAPIConfig:
         dimensions=2,
         passage_task="retrieval.passage",
         query_task="retrieval.query",
+        max_retries=2,
+        retry_backoff_seconds=0.01,
         timeout_seconds=12,
     )
 
@@ -69,6 +71,7 @@ class ApiMultimodalEmbedderTests(unittest.TestCase):
         self.assertEqual(loaded.model, "jina-embeddings-v5-omni-small")
         self.assertEqual(loaded.passage_task, "retrieval.passage")
         self.assertEqual(loaded.query_task, "retrieval.query")
+        self.assertEqual(loaded.max_retries, 3)
         self.assertIsNone(loaded.dimensions)
 
     def test_chunks_use_text_and_media_in_one_embedding_space(self) -> None:
@@ -126,7 +129,8 @@ class ApiMultimodalEmbedderTests(unittest.TestCase):
         payload = transport.calls[0]["payload"]
         self.assertEqual(payload["model"], "multimodal-model")
         self.assertEqual(payload["dimensions"], 2)
-        self.assertEqual(payload["encoding_format"], "float")
+        self.assertEqual(payload["embedding_type"], "float")
+        self.assertTrue(payload["normalized"])
         self.assertEqual(payload["task"], "retrieval.passage")
         self.assertEqual(
             payload["input"],
