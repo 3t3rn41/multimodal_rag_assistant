@@ -116,11 +116,13 @@ class ApiMultimodalEmbedderTests(unittest.TestCase):
         vectors = provider.embed_chunks(chunks)
 
         self.assertEqual(vectors[0], (1.0, 0.0))
-        self.assertEqual(vectors[2], (1.0, 0.0))
         expected = math.sqrt(0.5)
         self.assertAlmostEqual(vectors[1][0], expected)
         self.assertAlmostEqual(vectors[1][1], expected)
-        self.assertAlmostEqual(vectors[3][0], expected)
+        self.assertAlmostEqual(vectors[2][0], expected)
+        self.assertAlmostEqual(vectors[2][1], expected)
+        self.assertAlmostEqual(vectors[3][0], 1 / math.sqrt(5))
+        self.assertAlmostEqual(vectors[3][1], 2 / math.sqrt(5))
         payload = transport.calls[0]["payload"]
         self.assertEqual(payload["model"], "multimodal-model")
         self.assertEqual(payload["dimensions"], 2)
@@ -182,7 +184,9 @@ class ApiMultimodalEmbedderTests(unittest.TestCase):
         )
 
     def test_audio_and_video_paths_can_be_resolved_to_jina_inputs(self) -> None:
-        transport = RecordingTransport([[1, 0], [0, 1], [1, 1]])
+        transport = RecordingTransport(
+            [[1, 0], [0, 1], [1, 0], [0, 1], [0, 1]]
+        )
         provider = ApiMultimodalEmbedder(
             config(),
             transport=transport,

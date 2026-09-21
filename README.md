@@ -32,8 +32,8 @@
 | 后端 API | 用户、文件、知识库、任务、对话和 Chunk 溯源接口 | FastAPI、分层架构、SSE |
 | 异步任务 | 文档解析、媒体处理、向量化和重试 | Celery + Redis；评估 Dramatiq/arq |
 | 数据处理 | PDF/Word/图片/音视频解析、清洗、切片和多模态对齐 | `ingestion/` 契约层；可接 PyMuPDF、Unstructured、FFmpeg、Whisper、OCR |
-| 向量与检索 | API 多模态 Embedding、向量入库、向量检索、BM25、RRF | Qdrant（优先）或 Milvus；SiliconFlow Qwen VL API |
-| 生成与评估 | Query 改写、Rerank、Prompt、流式生成、效果评估 | SiliconFlow Qwen VL Reranker、可配置的大模型 API |
+| 向量与检索 | API 多模态 Embedding、向量入库、向量检索、BM25、RRF | Qdrant（优先）或 Milvus；Jina Embeddings API |
+| 生成与评估 | Query 改写、Rerank、Prompt、流式生成、效果评估 | Jina Reranker、可配置的大模型 API |
 | 基础设施 | 关系数据、对象存储、服务编排与部署 | MySQL、MinIO、Docker Compose |
 
 ### 数据流与异步任务
@@ -144,7 +144,7 @@ celery-worker · celery-beat（按需启用）
 
 - BM25 + 向量检索 + 加权 RRF 混合召回；
 - Qdrant `query_points` 适配器；
-- SiliconFlow `Qwen/Qwen3-VL-Reranker-8B` API Rerank 适配器；
+- Jina `jina-reranker-v3` API Rerank 适配器；
 - OpenAI-compatible 多厂商流式模型适配；
 - 可信 Chunk 白名单校验与结构化引用；
 - 评估数据集、Precision/Recall/Hit Rate/MRR/Citation Accuracy 指标和回归脚本。
@@ -159,9 +159,9 @@ python -m unittest discover -s tests -v
 [`docs/member-b-data.md`](./docs/member-b-data.md)。
 
 成员 B 的向量化实现是 API-only：不会在本地下载或加载 Embedding 模型，默认使用
-SiliconFlow `Qwen/Qwen3-VL-Embedding-8B`。复制
+Jina `jina-embeddings-v5-omni-small`。复制
 [`.env.example`](./.env.example) 并填写 `RAG_EMBEDDING_API_URL`、
-`SILICONFLOW_API_KEY`、模型名和可选维度后，可用
+`JINA_API_KEY`、模型名和可选维度后，可用
 `python -m scripts.index_chunks` 批量写入 Qdrant；中断重跑会按 `chunk_id` 跳过已入库数据。
 模型比较和输入路由规则见
 [`docs/embedding-model-selection.md`](./docs/embedding-model-selection.md)。
@@ -174,8 +174,11 @@ SiliconFlow `Qwen/Qwen3-VL-Embedding-8B`。复制
 - `chunk_document`：保留页码、标题层级，并按重叠窗口切分文档块；
 - `image_chunk`：将图片描述和原图路径封装为可检索 Chunk；
 - `chunk_media`：按时间窗融合 ASR 文本和视频帧描述；转写只归属一个窗口，引用时间使用实际证据边界；
-- `ApiMultimodalEmbedder`：通过外部图文 Embedding API 统一处理文本、图片和视频代表帧；
+- `ApiMultimodalEmbedder`：通过 Jina v5-omni Embedding API 统一处理文本、图片、原始音频、原始视频和代表帧；
 - `index_chunks`：批量校验向量、支持断点续传，并通过 `QdrantVectorWriter` 写入向量库。
+
+切片时会为每个 Chunk 生成并持久化随机 UUID4 到
+`extra["qdrant_point_id"]`；Qdrant 断点索引只接受该 UUID，不会从业务 ID 计算哈希。
 
 这些接口不强绑定具体 PDF/OCR/ASR/VLM 服务，上游解析器只需产出
 `DocumentBlock`、`TranscriptSegment` 和 `FrameDescription` 即可接入。生成的

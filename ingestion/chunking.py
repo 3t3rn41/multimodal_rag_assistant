@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Sequence
+from uuid import uuid4
 
 from rag_engine.models import Chunk
 
@@ -37,6 +38,7 @@ def chunk_document(
             extra = dict(block.extra)
             if block.heading:
                 extra.setdefault("heading", block.heading.strip())
+            extra.setdefault("qdrant_point_id", str(uuid4()))
             chunks.append(
                 Chunk(
                     chunk_id=f"{file_id}:document:{len(chunks):04d}",
@@ -67,6 +69,7 @@ def image_chunk(
         raise ValueError("image media_path must not be empty")
     metadata = dict(extra or {})
     metadata.setdefault("modality", "image")
+    metadata.setdefault("qdrant_point_id", str(uuid4()))
     return Chunk(
         chunk_id=f"{file_id}:image",
         file_id=file_id,
@@ -84,6 +87,7 @@ def chunk_media(
     *,
     source_type: str = "video",
     window_seconds: float = 30.0,
+    source_media_path: str | None = None,
 ) -> list[Chunk]:
     """Fuse ASR and frame descriptions into fixed, time-addressable windows.
 
@@ -148,7 +152,10 @@ def chunk_media(
             "window_start": start,
             "window_end": end,
             "window_seconds": window_seconds,
+            "qdrant_point_id": str(uuid4()),
         }
+        if source_media_path:
+            extra["source_media_path"] = source_media_path
         chunks.append(
             Chunk(
                 chunk_id=f"{file_id}:{source_type}:{start:g}-{end:g}",
@@ -157,7 +164,7 @@ def chunk_media(
                 content="\n".join(content_parts),
                 time_start=min(evidence_starts),
                 time_end=max(evidence_ends),
-                media_path=frame_paths[0] if frame_paths else None,
+                media_path=frame_paths[0] if frame_paths else source_media_path,
                 extra=extra,
             )
         )

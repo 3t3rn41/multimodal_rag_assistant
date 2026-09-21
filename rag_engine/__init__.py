@@ -3,7 +3,7 @@
 from .citations import CitationParser, citation_from_chunk
 from .models import Chunk, Citation, RetrievalCandidate
 from .pipeline import RAGPipeline
-from .rerank import SiliconFlowRerankConfig, SiliconFlowReranker
+from .rerank import JinaRerankConfig, JinaReranker
 from .retrieval import BM25Retriever, HybridRetriever, reciprocal_rank_fusion
 
 __all__ = [
@@ -14,8 +14,8 @@ __all__ = [
     "HybridRetriever",
     "RAGPipeline",
     "RetrievalCandidate",
-    "SiliconFlowRerankConfig",
-    "SiliconFlowReranker",
+    "JinaRerankConfig",
+    "JinaReranker",
     "citation_from_chunk",
     "reciprocal_rank_fusion",
 ]

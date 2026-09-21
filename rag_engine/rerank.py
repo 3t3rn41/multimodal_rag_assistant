@@ -1,10 +1,10 @@
-"""Second-stage reranking interfaces and API-backed Qwen adapters."""
+"""Second-stage reranking interfaces and Jina API adapter."""
 
 from __future__ import annotations
 
 import math
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import replace
 from typing import Any, Protocol
@@ -13,7 +13,7 @@ from .models import RetrievalCandidate
 
 
 class RerankAPIError(RuntimeError):
-    """Raised when SiliconFlow returns an invalid rerank response."""
+    """Raised when Jina returns an invalid rerank response."""
 
 
 class RerankTransport(Protocol):
@@ -42,7 +42,7 @@ class HttpxRerankTransport:
             import httpx
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise RuntimeError(
-                "SiliconFlow reranking requires the 'api' optional dependency"
+                "Jina reranking requires the 'api' optional dependency"
             ) from exc
         try:
             response = httpx.post(
@@ -61,12 +61,12 @@ class HttpxRerankTransport:
 
 
 @dataclass(frozen=True, slots=True)
-class SiliconFlowRerankConfig:
-    """Configuration for SiliconFlow Qwen3-VL-Reranker-8B."""
+class JinaRerankConfig:
+    """Configuration for Jina's text reranker API."""
 
-    url: str = "https://api.siliconflow.cn/v1/rerank"
+    url: str = "https://api.jina.ai/v1/rerank"
     api_key: str = ""
-    model: str = "Qwen/Qwen3-VL-Reranker-8B"
+    model: str = "jina-reranker-v3"
     timeout_seconds: float = 60.0
 
     def __post_init__(self) -> None:
@@ -83,13 +83,13 @@ class SiliconFlowRerankConfig:
     def from_env(
         cls,
         env: Mapping[str, str] | None = None,
-    ) -> "SiliconFlowRerankConfig":
+    ) -> "JinaRerankConfig":
         values = os.environ if env is None else env
         api_key = values.get("RAG_RERANK_API_KEY", "").strip() or values.get(
-            "SILICONFLOW_API_KEY", ""
+            "JINA_API_KEY", ""
         ).strip()
         if not api_key:
-            raise ValueError("RAG_RERANK_API_KEY or SILICONFLOW_API_KEY is required")
+            raise ValueError("RAG_RERANK_API_KEY or JINA_API_KEY is required")
         try:
             timeout = float(values.get("RAG_RERANK_TIMEOUT_SECONDS", "60"))
         except ValueError as exc:
@@ -97,12 +97,12 @@ class SiliconFlowRerankConfig:
         return cls(
             url=values.get(
                 "RAG_RERANK_API_URL",
-                "https://api.siliconflow.cn/v1/rerank",
+                "https://api.jina.ai/v1/rerank",
             ),
             api_key=api_key,
             model=values.get(
                 "RAG_RERANK_MODEL",
-                "Qwen/Qwen3-VL-Reranker-8B",
+                "jina-reranker-v3",
             ),
             timeout_seconds=timeout,
         )
@@ -132,25 +132,22 @@ class NoOpReranker:
         return [replace(item, rank=rank) for rank, item in enumerate(candidates[:top_k], start=1)]
 
 
-class SiliconFlowReranker:
-    """Use SiliconFlow's multimodal Qwen reranker for second-stage ranking.
+class JinaReranker:
+    """Use Jina's text reranker over the normalized chunk content.
 
-    SiliconFlow's VL rerank endpoint accepts each document as text or image.
-    For image/video chunks this adapter sends the accessible representative
-    image; document and audio chunks are sent as text. The embedding stage
-    still fuses text and image vectors for those chunks.
+    Media chunks retain their transcript and image descriptions in ``content``;
+    Jina's text reranker uses that searchable representation while the Jina
+    v5-omni embedding stage handles native media inputs.
     """
 
     def __init__(
         self,
-        config: SiliconFlowRerankConfig,
+        config: JinaRerankConfig,
         *,
         transport: RerankTransport | None = None,
-        media_url_resolver: Callable[[str], str | None] | None = None,
     ) -> None:
         self.config = config
         self.transport = transport or HttpxRerankTransport()
-        self.media_url_resolver = media_url_resolver
 
     def rerank(
         self,
@@ -191,24 +188,10 @@ class SiliconFlowReranker:
             for rank, (index, score) in enumerate(ranked[:selected_count], start=1)
         ]
 
-    def _document_input(self, candidate: RetrievalCandidate) -> dict[str, str]:
-        media_url = self._media_url(candidate)
-        if media_url is not None:
-            return {"image": media_url}
+    def _document_input(self, candidate: RetrievalCandidate) -> str:
         if not candidate.chunk.content.strip():
             raise ValueError(f"chunk {candidate.chunk_id!r} has no rerank content")
-        return {"text": candidate.chunk.content}
-
-    def _media_url(self, candidate: RetrievalCandidate) -> str | None:
-        chunk = candidate.chunk
-        if chunk.source_type not in {"image", "video"} or not chunk.media_path:
-            return None
-        value = chunk.media_path
-        if self.media_url_resolver is not None:
-            value = self.media_url_resolver(value) or ""
-        if value.startswith(("https://", "http://", "data:")):
-            return value
-        return None
+        return candidate.chunk.content
 
 
 def _parse_rerank_results(

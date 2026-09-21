@@ -2,8 +2,8 @@
 
 成员 B 的实现位于 `ingestion/`，输出直接复用成员 C 的
 `rag_engine.models.Chunk`，因此不需要改动 `BM25Retriever`、`HybridRetriever`
-或 `QdrantVectorRetriever`。Embedding 不在本地加载模型，统一调用硅基流动的
-`Qwen/Qwen3-VL-Embedding-8B` API，示例配置见 `.env.example`，模型取舍见
+或 `QdrantVectorRetriever`。Embedding 不在本地加载模型，统一调用 Jina 的
+`jina-embeddings-v5-omni-small` API，示例配置见 `.env.example`，模型取舍见
 [`embedding-model-selection.md`](./embedding-model-selection.md)。
 
 ## 与成员 C 的契约
@@ -15,6 +15,8 @@
 - 音频/视频：使用实际证据边界的 `time_start`、`time_end`，语音和画面描述合并到 `content`；固定检索桶保存在 `extra.window_start`/`window_end`；
 - 向量：写入 `Chunk.embedding`，传给 Qdrant 时作为 point vector，其他元数据由
   `Chunk.to_payload()` 提供。
+- `extra["qdrant_point_id"]`：由切片入口生成并随 Chunk 持久化的随机 UUID4，供
+  Qdrant 断点索引使用；禁止通过业务 ID 计算哈希 ID。
 
 成员 C 的 `QdrantVectorRetriever` 从 point payload 调用
 `Chunk.from_payload()`，所以入库端不得把 `chunk_id`、来源类型或时间字段藏在
@@ -67,10 +69,11 @@ report = index_chunks(chunks, provider, writer, batch_size=64)
 批次内和批次间维度不一致、空向量、非有限值都会在写入前被拒绝，`report` 会记录
 总数、跳过数、实际向量化数和写入数。
 
-生产 API 入口是 `ApiMultimodalEmbedder`：文档和音频发送文本，图片和视频发送
-融合文本及可访问的图片 URL；私有 `minio://` 路径必须由应用层转换为短时
-presigned HTTPS URL。硅基流动 VL Embedding 暂不直接接收视频，所以视频使用
-代表帧。`scripts/index_chunks.py` 支持已入库 Chunk 跳过、批量写入
+生产 API 入口是 `ApiMultimodalEmbedder`：文档发送文本，图片发送文本与图片，
+音频发送转写文本与原始音频，视频发送融合文本、原始视频和可访问的代表帧；
+私有 `minio://` 路径必须由应用层转换为短时 presigned HTTPS URL。Jina
+`v5-omni` 支持共享向量空间中的文本、图片、音频和视频输入。`scripts/index_chunks.py`
+支持已入库 Chunk 跳过、批量写入
 和结束后的一致性检查：
 
 ```bash

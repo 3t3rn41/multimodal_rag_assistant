@@ -312,6 +312,7 @@ class VideoIngestionPipeline:
             descriptions,
             source_type="video",
             window_seconds=window_seconds,
+            source_media_path=str(video_path),
         )
 
 
@@ -330,6 +331,7 @@ def ingest_audio(
         [],
         source_type="audio",
         window_seconds=window_seconds,
+        source_media_path=str(audio_path),
     )
 
 

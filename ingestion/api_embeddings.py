@@ -1,10 +1,4 @@
-"""API-only multimodal embeddings for text, image, audio, and video chunks.
-
-The production configuration targets SiliconFlow's Qwen3-VL-Embedding API.
-Audio and video chunks are represented by transcript text and representative
-video frames because the embedding endpoint currently accepts text and images,
-not raw audio or video.
-"""
+"""Jina API embeddings for text, image, audio, and video chunks."""
 
 from __future__ import annotations
 
@@ -70,13 +64,15 @@ class HttpxJsonTransport:
 
 @dataclass(frozen=True, slots=True)
 class MultimodalEmbeddingAPIConfig:
-    """Configuration for SiliconFlow's OpenAI-shaped embedding endpoint."""
+    """Configuration for Jina's multimodal embedding endpoint."""
 
     url: str
     api_key: str
-    model: str = "Qwen/Qwen3-VL-Embedding-8B"
+    model: str = "jina-embeddings-v5-omni-small"
     dimensions: int | None = None
     timeout_seconds: float = 60.0
+    passage_task: str = "retrieval.passage"
+    query_task: str = "retrieval.query"
 
     def __post_init__(self) -> None:
         if not self.url.strip():
@@ -89,6 +85,8 @@ class MultimodalEmbeddingAPIConfig:
             raise ValueError("embedding dimensions must be positive")
         if self.timeout_seconds <= 0 or not math.isfinite(self.timeout_seconds):
             raise ValueError("embedding timeout must be a finite positive number")
+        if not self.passage_task.strip() or not self.query_task.strip():
+            raise ValueError("embedding tasks must not be empty")
 
     @classmethod
     def from_env(
@@ -99,11 +97,11 @@ class MultimodalEmbeddingAPIConfig:
 
         values = os.environ if env is None else env
         api_key = values.get("RAG_EMBEDDING_API_KEY", "").strip() or values.get(
-            "SILICONFLOW_API_KEY", ""
+            "JINA_API_KEY", ""
         ).strip()
         if not api_key:
             raise ValueError(
-                "RAG_EMBEDDING_API_KEY or SILICONFLOW_API_KEY is required"
+                "RAG_EMBEDDING_API_KEY or JINA_API_KEY is required"
             )
         try:
             raw_dimensions = values.get("RAG_EMBEDDING_DIMENSIONS", "").strip()
@@ -117,24 +115,29 @@ class MultimodalEmbeddingAPIConfig:
         return cls(
             url=values.get(
                 "RAG_EMBEDDING_API_URL",
-                "https://api.siliconflow.cn/v1/embeddings",
+                "https://api.jina.ai/v1/embeddings",
             ),
             api_key=api_key,
             model=values.get(
                 "RAG_EMBEDDING_MODEL",
-                "Qwen/Qwen3-VL-Embedding-8B",
+                "jina-embeddings-v5-omni-small",
             ),
             dimensions=dimensions,
             timeout_seconds=timeout,
+            passage_task=values.get(
+                "RAG_EMBEDDING_PASSAGE_TASK", "retrieval.passage"
+            ),
+            query_task=values.get("RAG_EMBEDDING_QUERY_TASK", "retrieval.query"),
         )
 
 
 class ApiMultimodalEmbedder:
-    """Embed all modalities through one text/image API and vector space.
+    """Embed all modalities through Jina's shared ``v5-omni`` vector space.
 
-    Document and audio chunks contribute text. Image and video chunks contribute
-    both their searchable text and a resolvable image reference. Multiple vectors
-    for one chunk are averaged after L2 normalization and normalized again.
+    Every chunk contributes searchable text. Images add an image input, audio
+    adds its raw audio input, and video adds its raw video plus a representative
+    frame when those paths resolve to HTTP(S) or data URLs. Multiple vectors for
+    one chunk are averaged after L2 normalization and normalized again.
     """
 
     def __init__(
@@ -152,16 +155,19 @@ class ApiMultimodalEmbedder:
         """Embed corpus text through the configured multimodal API."""
 
         inputs = [{"text": text} for text in texts]
-        return self._request(inputs)
+        return self._request(inputs, task=self.config.passage_task)
 
     def embed_query(self, text: str) -> list[float]:
         """Embed a retrieval query for member C's Qdrant adapter."""
 
-        vectors = self._request([{"text": text}])
+        vectors = self._request(
+            [{"text": text}],
+            task=self.config.query_task,
+        )
         return list(vectors[0])
 
     def embed_chunks(self, chunks: Sequence[Chunk]) -> list[tuple[float, ...]]:
-        """Embed chunk text and representative media in one API request."""
+        """Embed chunk text and native media inputs in one API request."""
 
         inputs: list[dict[str, str]] = []
         groups: list[list[int]] = []
@@ -170,21 +176,42 @@ class ApiMultimodalEmbedder:
             if chunk.content.strip():
                 indexes.append(len(inputs))
                 inputs.append({"text": chunk.content})
-            media_url = self._media_url(chunk)
-            if media_url is not None:
+            for media_input in self._media_inputs(chunk):
                 indexes.append(len(inputs))
-                inputs.append({"image": media_url})
+                inputs.append(media_input)
             if not indexes:
                 raise ValueError(f"chunk {chunk.chunk_id!r} has no embeddable content")
             groups.append(indexes)
 
-        vectors = self._request(inputs)
+        vectors = self._request(inputs, task=self.config.passage_task)
         return [_mean_unit_vector([vectors[index] for index in group]) for group in groups]
 
-    def _media_url(self, chunk: Chunk) -> str | None:
-        if chunk.source_type not in {"image", "video"} or not chunk.media_path:
+    def _media_inputs(self, chunk: Chunk) -> list[dict[str, str]]:
+        values: list[dict[str, str]] = []
+        if chunk.source_type == "image":
+            media_url = self._resolve_media_url(chunk.media_path)
+            if media_url is not None:
+                values.append({"image": media_url})
+        elif chunk.source_type == "audio":
+            media_url = self._resolve_media_url(
+                _extra_string(chunk, "source_media_path")
+            )
+            if media_url is not None:
+                values.append({"audio": media_url})
+        elif chunk.source_type == "video":
+            media_url = self._resolve_media_url(
+                _extra_string(chunk, "source_media_path")
+            )
+            if media_url is not None:
+                values.append({"video": media_url})
+            frame_url = self._resolve_media_url(chunk.media_path)
+            if frame_url is not None:
+                values.append({"image": frame_url})
+        return values
+
+    def _resolve_media_url(self, value: str | None) -> str | None:
+        if not value:
             return None
-        value = chunk.media_path
         if self.media_url_resolver is not None:
             value = self.media_url_resolver(value) or ""
         if value.startswith(("https://", "http://", "data:")):
@@ -194,12 +221,15 @@ class ApiMultimodalEmbedder:
     def _request(
         self,
         inputs: Sequence[dict[str, str]],
+        *,
+        task: str,
     ) -> list[tuple[float, ...]]:
         if not inputs:
             return []
         payload: dict[str, object] = {
             "model": self.config.model,
             "encoding_format": "float",
+            "task": task,
             "input": list(inputs),
         }
         if self.config.dimensions is not None:
@@ -259,6 +289,11 @@ def _mean_unit_vector(vectors: Sequence[Sequence[float]]) -> tuple[float, ...]:
         for index in range(dimension)
     )
     return _unit_vector(mean)
+
+
+def _extra_string(chunk: Chunk, key: str) -> str | None:
+    value = chunk.extra.get(key)
+    return value if isinstance(value, str) else None
 
 
 def _unit_vector(vector: Sequence[float]) -> tuple[float, ...]:

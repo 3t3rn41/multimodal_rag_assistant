@@ -10,7 +10,7 @@
 
 ```text
 向量召回 top-N ─┐
-                 ├─ weighted RRF ─> 候选 top-N ─> SiliconFlow Qwen VL Rerank ─> top-k 上下文
+                 ├─ weighted RRF ─> 候选 top-N ─> Jina Rerank ─> top-k 上下文
 BM25 召回 top-N ┘
 ```
 
@@ -18,15 +18,16 @@ RRF 只使用排名而不直接比较不同检索器的原始分数，避免余�
 
 ### Rerank
 
-生产默认使用 `SiliconFlowReranker` 调用 `Qwen/Qwen3-VL-Reranker-8B`，对 query-document
+生产默认使用 `JinaReranker` 调用 `jina-reranker-v3`，对 query-document
 候选重新打分，再保留最终 top-k。`CrossEncoderReranker` 仍保留为本地兼容实现，
 但不属于当前生产路径；未配置 API 时可以用 `NoOpReranker` 跑通本地闭环。生产环境建议：
 
-- 召回 top-50～top-100，再进行一次 SiliconFlow Qwen VL 精排；
+- 召回 top-50～top-100，再进行一次 Jina 精排；
 - 通过离线评估集调节 `top_k` 和相关性阈值；
 - 将 API Key 只放在环境变量中，不写入日志；
 - 对模型版本、请求延迟、API 限流和线上费用做记录；
-- 图片/视频候选发送可访问代表帧，文档/音频候选发送文本。
+- 图片、音频和视频的多模态内容由 Jina Embeddings 在向量召回阶段处理；Jina
+  `jina-reranker-v3` 精排阶段使用 Chunk 中的转写和描述文本。
 
 ### 生成与引用
 
@@ -78,13 +79,13 @@ retriever = HybridRetriever(bm25, vector, candidate_k=50)
 ```python
 from rag_engine.llm import OpenAICompatibleChatModel, OpenAICompatibleConfig
 from rag_engine.pipeline import RAGPipeline
-from rag_engine.rerank import SiliconFlowRerankConfig, SiliconFlowReranker
+from rag_engine.rerank import JinaRerankConfig, JinaReranker
 
 model = OpenAICompatibleChatModel(OpenAICompatibleConfig.from_env())
 pipeline = RAGPipeline(
     retriever,
     model,
-    reranker=SiliconFlowReranker(SiliconFlowRerankConfig.from_env()),
+    reranker=JinaReranker(JinaRerankConfig.from_env()),
     retrieval_k=50,
     answer_k=8,
 )
@@ -108,5 +109,5 @@ Faithfulness 需要人工标注或独立评审模型，不能仅由检索命中�
 
 - [Qdrant Hybrid Queries](https://qdrant.tech/documentation/search/hybrid-queries/)：dense/sparse 多路查询与 RRF 融合；
 - [Qdrant Hybrid Search with Reranking](https://qdrant.tech/documentation/tutorials-basics/reranking-hybrid-search/)：先召回再重排的多阶段检索模式；
-- [SiliconFlow Embedding API](https://api-docs.siliconflow.cn/docs/api/embeddings-post)：文本、图片和混合输入；
-- [SiliconFlow Rerank API](https://api-docs.siliconflow.cn/docs/api/rerank-post)：Qwen VL 多模态重排序输入与结果格式。
+- [Jina Embeddings](https://jina.ai/en-US/embeddings/)：文本、图片、音频和视频的共享向量空间；
+- [Jina Rerank API](https://jina.ai/?model=jina-reranker-v3)：文本候选的二阶段重排序。

@@ -6,7 +6,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import UUID
 
 from rag_engine.models import Chunk
 
@@ -167,7 +167,7 @@ class QdrantVectorWriter:
             vector = values if self.vector_name is None else {self.vector_name: values}
             points.append(
                 PointStruct(
-                    id=_qdrant_point_id(chunk.chunk_id),
+                    id=_qdrant_point_id(chunk),
                     vector=vector,
                     payload=chunk.to_payload(),
                 )
@@ -186,7 +186,7 @@ class QdrantVectorWriter:
             return set()
         points = self.client.retrieve(
             collection_name=self.collection_name,
-            ids=[_qdrant_point_id(chunk.chunk_id) for chunk in chunks],
+            ids=[_qdrant_point_id(chunk) for chunk in chunks],
             with_payload=True,
             with_vectors=False,
         )
@@ -211,9 +211,22 @@ def _normalize_vector(vector: Sequence[float]) -> tuple[float, ...]:
     return normalized
 
 
-def _qdrant_point_id(chunk_id: str) -> str:
+def _qdrant_point_id(chunk: Chunk) -> str:
+    """Return the persisted Qdrant UUID without deriving one from chunk text.
+
+    The ingestion layer assigns a random UUID4 and stores it in the chunk
+    payload. Arbitrary IDs must fail here instead of being converted through a
+    hash, which would violate the project's no-hash constraint and could make
+    a resumed index depend on an implicit identifier scheme.
+    """
+
+    candidate = chunk.extra.get("qdrant_point_id")
+    if candidate is None:
+        candidate = chunk.chunk_id
     try:
-        UUID(chunk_id)
-    except ValueError:
-        return str(uuid5(NAMESPACE_URL, f"multimodal-rag:{chunk_id}"))
-    return chunk_id
+        return str(UUID(str(candidate)))
+    except (AttributeError, ValueError, TypeError) as exc:
+        raise ValueError(
+            f"chunk {chunk.chunk_id!r} requires a persisted UUID in "
+            "extra['qdrant_point_id'] or UUID chunk_id"
+        ) from exc

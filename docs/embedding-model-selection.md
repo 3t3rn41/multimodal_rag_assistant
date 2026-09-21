@@ -1,51 +1,51 @@
-# SiliconFlow Qwen 多模态 Embedding 与 Rerank
+# Jina 多模态 Embedding 与 Rerank
 
 ## 结论
 
-项目运行时统一使用硅基流动 API，不下载或加载本地 Embedding/Rerank 模型：
+项目运行时统一使用 Jina API，不下载或加载本地 Embedding/Rerank 模型：
 
-- Embedding：`Qwen/Qwen3-VL-Embedding-8B`，请求
-  `https://api.siliconflow.cn/v1/embeddings`；
-- Rerank：`Qwen/Qwen3-VL-Reranker-8B`，请求
-  `https://api.siliconflow.cn/v1/rerank`。
+- Embedding：`jina-embeddings-v5-omni-small`，请求
+  `https://api.jina.ai/v1/embeddings`，默认 1024 维；
+- Rerank：`jina-reranker-v3`，请求
+  `https://api.jina.ai/v1/rerank`。
 
-硅基流动官方 Embedding 文档明确支持文本、图片 URL/base64 和混合输入；官方当前
-也明确注明 VL Embedding 暂不支持直接输入视频。因此视频先由 FFmpeg 抽取代表帧，
-音频先由转写 API 变成带时间戳文本，再进入统一的 Chunk 检索链路。
+Jina `v5-omni` 将文本、图片、音频、视频和 PDF 放入共享向量空间。Chunk 的文本
+描述仍然保留，音频和视频则在可访问 URL 存在时额外发送原始媒体；视频代表帧也可
+作为补充视觉证据发送。
 
 ## 输入路由
 
 | Chunk 类型 | Embedding API 输入 | Rerank API 文档输入 |
 | --- | --- | --- |
-| `document` | `{"text": content}` | `{"text": content}` |
-| `image` | 文本描述 + `{"image": media_url}`，向量归一化后取均值 | `{"image": media_url}` |
-| `audio` | `{"text": content}`，内容来自带时间戳 ASR | `{"text": content}` |
-| `video` | 融合文本 + 代表帧 `{"image": media_url}` | `{"image": media_url}` |
+| `document` | `{"text": content}` | `content` |
+| `image` | 文本描述 + `{"image": media_url}`，向量归一化后取均值 | `content` |
+| `audio` | `{"text": content}` + `{"audio": media_url}` | `content` |
+| `video` | 融合文本 + `{"video": media_url}` + 可选 `{"image": frame_url}` | `content` |
 
-官方 Rerank 请求的多模态文档项是文本或图片对象，当前不把一个文档拼成未被官方
-文档声明的混合对象。因此图片/视频优先发送代表图像，语音内容已经保留在 Chunk
-文本中并参与 Embedding/BM25；需要同时让 Rerank 看语音和画面时，应用层可将转写
-内容拼入查询，或在后续升级时按 API 新能力扩展。
+Embedding 请求使用 `retrieval.passage`；查询向量使用 `retrieval.query`。Rerank
+阶段使用 `content` 中已经对齐的转写和画面描述，避免把本地文件路径直接发给文本
+重排模型。
 
 私有 `minio://` 路径必须由应用层回调转换成短时 presigned HTTPS URL，避免把内部
-对象存储地址直接发给硅基流动。没有可访问的媒体 URL 时，代码会安全回退到文本
+对象存储地址直接发给 Jina。没有可访问的媒体 URL 时，代码会安全回退到文本
 描述，而不是发送本地路径。
 
 ## 配置
 
 ```bash
-SILICONFLOW_API_KEY=填入你的 Key
-RAG_EMBEDDING_MODEL=Qwen/Qwen3-VL-Embedding-8B
-RAG_RERANK_MODEL=Qwen/Qwen3-VL-Reranker-8B
+JINA_API_KEY=填入你的 Key
+RAG_EMBEDDING_MODEL=jina-embeddings-v5-omni-small
+RAG_RERANK_MODEL=jina-reranker-v3
+RAG_EMBEDDING_PASSAGE_TASK=retrieval.passage
+RAG_EMBEDDING_QUERY_TASK=retrieval.query
 ```
 
-Embedding 的 `RAG_EMBEDDING_DIMENSIONS` 可留空，使用 API 返回的原生维度；如果
-服务端支持并且团队已经确定 Qdrant 集合维度，再显式填写。Embedding、Rerank 的
-请求地址、超时和 provider-specific Key 都可以通过 [`.env.example`](../.env.example)
-覆盖。
+Embedding 的 `RAG_EMBEDDING_DIMENSIONS` 默认填写 1024，以便和 Qdrant 集合维度
+一致；Embedding、Rerank 的请求地址、超时和 provider-specific Key 都可以通过
+[`.env.example`](../.env.example) 覆盖。
 
 ## 官方依据
 
-- [SiliconFlow 创建嵌入请求](https://api-docs.siliconflow.cn/docs/api/embeddings-post)
-- [SiliconFlow 创建重排序请求](https://api-docs.siliconflow.cn/docs/api/rerank-post)
-- [SiliconFlow 获取用户模型列表](https://api-docs.siliconflow.cn/docs/api/models-get)
+- [Jina Embeddings API](https://jina.ai/en-US/embeddings/)
+- [Jina v5-omni 发布说明](https://jina.ai/news/jina-embeddings-v5-omni-multimodal-embeddings-for-text-image-audio-and-video/)
+- [Jina Rerank API](https://jina.ai/?model=jina-reranker-v3)
