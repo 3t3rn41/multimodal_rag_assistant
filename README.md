@@ -2,7 +2,7 @@
 
 一个面向文档、图片、音频和视频资料的多模态检索增强生成（RAG）系统方案。项目目标是将非结构化资料统一解析为带有来源、页码或时间轴信息的 Chunk，通过混合检索与重排序召回可靠上下文，再由大模型生成可追溯的流式回答。
 
-> 当前状态：项目处于方案落地阶段。成员 C 的检索、重排、流式生成、结构化引用和评估基线已实现，数据解析、后端 API、前端和部署模块将按里程碑继续接入。
+> 当前状态：项目处于方案落地阶段。成员 B 已完成统一 Chunk 数据契约、文档/图片/音视频切片对齐和批量向量入库边界；成员 C 的检索、重排、流式生成、结构化引用和评估基线已实现，后端 API、前端和部署模块将按里程碑继续接入。
 
 ## 项目目标
 
@@ -31,9 +31,9 @@
 | 前端与交互 | 知识库管理、文件上传、解析进度、对话与引用播放 | React/Vite/TypeScript 或 Vue3/Vite |
 | 后端 API | 用户、文件、知识库、任务、对话和 Chunk 溯源接口 | FastAPI、分层架构、SSE |
 | 异步任务 | 文档解析、媒体处理、向量化和重试 | Celery + Redis；评估 Dramatiq/arq |
-| 数据处理 | PDF/Word/图片/音视频解析、清洗、切片和多模态对齐 | PyMuPDF、Unstructured、FFmpeg、Whisper、OCR |
-| 向量与检索 | Embedding、向量入库、向量检索、BM25、RRF | Qdrant（优先）或 Milvus、BGE/CLIP 系列 |
-| 生成与评估 | Query 改写、Rerank、Prompt、流式生成、效果评估 | bge-reranker、可配置的大模型 API |
+| 数据处理 | PDF/Word/图片/音视频解析、清洗、切片和多模态对齐 | `ingestion/` 契约层；可接 PyMuPDF、Unstructured、FFmpeg、Whisper、OCR |
+| 向量与检索 | API 多模态 Embedding、向量入库、向量检索、BM25、RRF | Qdrant（优先）或 Milvus；Jina Embeddings API |
+| 生成与评估 | Query 改写、Rerank、Prompt、流式生成、效果评估 | Jina Reranker、可配置的大模型 API |
 | 基础设施 | 关系数据、对象存储、服务编排与部署 | MySQL、MinIO、Docker Compose |
 
 ### 数据流与异步任务
@@ -144,7 +144,7 @@ celery-worker · celery-beat（按需启用）
 
 - BM25 + 向量检索 + 加权 RRF 混合召回；
 - Qdrant `query_points` 适配器；
-- `BAAI/bge-reranker-v2-m3` CrossEncoder Rerank 适配器；
+- Jina `jina-reranker-v3` API Rerank 适配器；
 - OpenAI-compatible 多厂商流式模型适配；
 - 可信 Chunk 白名单校验与结构化引用；
 - 评估数据集、Precision/Recall/Hit Rate/MRR/Citation Accuracy 指标和回归脚本。
@@ -154,6 +154,43 @@ celery-worker · celery-beat（按需启用）
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+成员 B 的数据解析、切片、时间对齐与向量入库接入说明见
+[`docs/member-b-data.md`](./docs/member-b-data.md)。
+
+成员 B 的向量化实现是 API-only：不会在本地下载或加载 Embedding 模型，默认使用
+Jina `jina-embeddings-v5-omni-small`。复制
+[`.env.example`](./.env.example) 并填写 `RAG_EMBEDDING_API_URL`、
+`JINA_API_KEY`、模型名和可选维度后，可用
+`python -m scripts.index_chunks --rebuild` 会在 Jina 专用的
+`jina_v5_omni_small_1024` 集合中全量重建索引；普通运行支持断点续传并按持久化
+UUID 跳过已入库数据。
+模型比较和输入路由规则见
+[`docs/embedding-model-selection.md`](./docs/embedding-model-selection.md)。
+
+## 成员 B 数据模块
+
+成员 B 的实现位于 `ingestion/`，与成员 C 的 `rag_engine` 通过统一的
+`rag_engine.models.Chunk` 对接：
+
+- `chunk_document`：保留页码、标题层级，并按重叠窗口切分文档块；
+- `image_chunk`：将图片描述和原图路径封装为可检索 Chunk；
+- `chunk_media`：按时间窗融合 ASR 文本和视频帧描述；转写只归属一个窗口，引用时间使用实际证据边界；
+- `ApiMultimodalEmbedder`：通过 Jina v5-omni Embedding API 统一处理文本、图片、原始音频、原始视频和代表帧；
+- `index_chunks`：批量校验向量、支持断点续传，并通过 `QdrantVectorWriter` 写入向量库；
+  已有集合会校验维度和 named vector，临时 Qdrant/转写故障会有限重试。
+
+Embedding 请求显式使用 `normalized=true` 和 `embedding_type=float`，网络错误及
+429/5xx 等临时错误会按指数退避重试。媒体流水线会先按 Chunk 的时间范围裁剪音频/视频；
+生产环境需在上传 MinIO 后将裁剪文件映射为 `minio://` 或 presigned HTTP(S) URL，
+否则索引命令会直接拒绝本地路径，避免退化为纯文本向量。
+
+切片时会为每个 Chunk 生成并持久化随机 UUID4 到
+`extra["qdrant_point_id"]`；Qdrant 断点索引只接受该 UUID，不会从业务 ID 计算哈希。
+
+这些接口不强绑定具体 PDF/OCR/ASR/VLM 服务，上游解析器只需产出
+`DocumentBlock`、`TranscriptSegment` 和 `FrameDescription` 即可接入。生成的
+Chunk 可直接被 C 的 BM25/混合检索和 `QdrantVectorRetriever` 消费。
 
 ## 文档
 

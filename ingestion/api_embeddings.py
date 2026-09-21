@@ -1,0 +1,357 @@
+"""Jina API embeddings for text, image, audio, and video chunks."""
+
+from __future__ import annotations
+
+import math
+import os
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+from rag_engine.models import Chunk
+
+from .retry import RetryPolicy, retry_call
+
+
+class EmbeddingAPIError(RuntimeError):
+    """Raised when the configured embedding API returns an invalid response."""
+
+
+class JsonTransport(Protocol):
+    """Small HTTP boundary that keeps API behavior deterministic in tests."""
+
+    def post_json(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, object],
+        timeout: float,
+    ) -> Mapping[str, Any]: ...
+
+
+class HttpxJsonTransport:
+    """Production JSON transport loaded lazily from the optional API extra."""
+
+    def __init__(
+        self,
+        *,
+        policy: RetryPolicy | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.policy = policy or RetryPolicy()
+        self.sleeper = sleeper
+
+    def post_json(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, object],
+        timeout: float,
+    ) -> Mapping[str, Any]:
+        try:
+            import httpx
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "API embeddings require the 'api' optional dependency"
+            ) from exc
+
+        def request() -> Any:
+            response = httpx.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            return response
+
+        try:
+            response = retry_call(
+                request,
+                policy=self.policy,
+                is_retryable=lambda exc: _is_retryable_httpx_error(httpx, exc),
+                sleeper=self.sleeper,
+            )
+            data = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise EmbeddingAPIError(f"embedding API request failed: {exc}") from exc
+        if not isinstance(data, Mapping):
+            raise EmbeddingAPIError("embedding API response must be a JSON object")
+        return data
+
+
+@dataclass(frozen=True, slots=True)
+class MultimodalEmbeddingAPIConfig:
+    """Configuration for Jina's multimodal embedding endpoint."""
+
+    url: str
+    api_key: str
+    model: str = "jina-embeddings-v5-omni-small"
+    dimensions: int | None = None
+    timeout_seconds: float = 60.0
+    passage_task: str = "retrieval.passage"
+    query_task: str = "retrieval.query"
+    max_retries: int = 3
+    retry_backoff_seconds: float = 0.5
+
+    def __post_init__(self) -> None:
+        if not self.url.strip():
+            raise ValueError("embedding API URL must not be empty")
+        if not self.api_key.strip():
+            raise ValueError("embedding API key must not be empty")
+        if not self.model.strip():
+            raise ValueError("embedding model must not be empty")
+        if self.dimensions is not None and self.dimensions <= 0:
+            raise ValueError("embedding dimensions must be positive")
+        if self.timeout_seconds <= 0 or not math.isfinite(self.timeout_seconds):
+            raise ValueError("embedding timeout must be a finite positive number")
+        if not self.passage_task.strip() or not self.query_task.strip():
+            raise ValueError("embedding tasks must not be empty")
+        RetryPolicy(self.max_retries, self.retry_backoff_seconds)
+
+    @classmethod
+    def from_env(
+        cls,
+        env: Mapping[str, str] | None = None,
+    ) -> "MultimodalEmbeddingAPIConfig":
+        """Load API settings without reading or logging any secret value."""
+
+        values = os.environ if env is None else env
+        api_key = values.get("RAG_EMBEDDING_API_KEY", "").strip() or values.get(
+            "JINA_API_KEY", ""
+        ).strip()
+        if not api_key:
+            raise ValueError(
+                "RAG_EMBEDDING_API_KEY or JINA_API_KEY is required"
+            )
+        try:
+            raw_dimensions = values.get("RAG_EMBEDDING_DIMENSIONS", "").strip()
+            dimensions = int(raw_dimensions) if raw_dimensions else None
+            timeout = float(values.get("RAG_EMBEDDING_TIMEOUT_SECONDS", "60"))
+        except ValueError as exc:
+            raise ValueError(
+                "RAG_EMBEDDING_DIMENSIONS and RAG_EMBEDDING_TIMEOUT_SECONDS "
+                "must be numeric"
+            ) from exc
+        return cls(
+            url=values.get(
+                "RAG_EMBEDDING_API_URL",
+                "https://api.jina.ai/v1/embeddings",
+            ),
+            api_key=api_key,
+            model=values.get(
+                "RAG_EMBEDDING_MODEL",
+                "jina-embeddings-v5-omni-small",
+            ),
+            dimensions=dimensions,
+            timeout_seconds=timeout,
+            passage_task=values.get(
+                "RAG_EMBEDDING_PASSAGE_TASK", "retrieval.passage"
+            ),
+            query_task=values.get("RAG_EMBEDDING_QUERY_TASK", "retrieval.query"),
+            max_retries=_int_env(values, "RAG_EMBEDDING_MAX_RETRIES", 3),
+            retry_backoff_seconds=_float_env(
+                values, "RAG_EMBEDDING_RETRY_BACKOFF_SECONDS", 0.5
+            ),
+        )
+
+
+class ApiMultimodalEmbedder:
+    """Embed all modalities through Jina's shared ``v5-omni`` vector space.
+
+    Every chunk contributes searchable text. Images add an image input, audio
+    adds its raw audio input, and video adds its raw video plus a representative
+    frame when those paths resolve to HTTP(S) or data URLs. Multiple vectors for
+    one chunk are averaged after L2 normalization and normalized again.
+    """
+
+    def __init__(
+        self,
+        config: MultimodalEmbeddingAPIConfig,
+        *,
+        transport: JsonTransport | None = None,
+        media_url_resolver: Callable[[str], str | None] | None = None,
+    ) -> None:
+        self.config = config
+        self.transport = transport or HttpxJsonTransport(
+            policy=RetryPolicy(config.max_retries, config.retry_backoff_seconds)
+        )
+        self.media_url_resolver = media_url_resolver
+
+    def embed(self, texts: Sequence[str]) -> list[tuple[float, ...]]:
+        """Embed corpus text through the configured multimodal API."""
+
+        inputs = [{"text": text} for text in texts]
+        return self._request(inputs, task=self.config.passage_task)
+
+    def embed_query(self, text: str) -> list[float]:
+        """Embed a retrieval query for member C's Qdrant adapter."""
+
+        vectors = self._request(
+            [{"text": text}],
+            task=self.config.query_task,
+        )
+        return list(vectors[0])
+
+    def embed_chunks(self, chunks: Sequence[Chunk]) -> list[tuple[float, ...]]:
+        """Embed chunk text and native media inputs in one API request."""
+
+        inputs: list[dict[str, str]] = []
+        groups: list[list[int]] = []
+        for chunk in chunks:
+            indexes: list[int] = []
+            if chunk.content.strip():
+                indexes.append(len(inputs))
+                inputs.append({"text": chunk.content})
+            for media_input in self._media_inputs(chunk):
+                indexes.append(len(inputs))
+                inputs.append(media_input)
+            if not indexes:
+                raise ValueError(f"chunk {chunk.chunk_id!r} has no embeddable content")
+            groups.append(indexes)
+
+        vectors = self._request(inputs, task=self.config.passage_task)
+        return [_mean_unit_vector([vectors[index] for index in group]) for group in groups]
+
+    def _media_inputs(self, chunk: Chunk) -> list[dict[str, str]]:
+        values: list[dict[str, str]] = []
+        if chunk.source_type == "image":
+            media_url = self._resolve_media_url(chunk.media_path)
+            if media_url is not None:
+                values.append({"image": media_url})
+        elif chunk.source_type == "audio":
+            media_url = self._resolve_media_url(
+                _extra_string(chunk, "source_media_path")
+            )
+            if media_url is not None:
+                values.append({"audio": media_url})
+        elif chunk.source_type == "video":
+            media_url = self._resolve_media_url(
+                _extra_string(chunk, "source_media_path")
+            )
+            if media_url is not None:
+                values.append({"video": media_url})
+            frame_url = self._resolve_media_url(chunk.media_path)
+            if frame_url is not None:
+                values.append({"image": frame_url})
+        return values
+
+    def _resolve_media_url(self, value: str | None) -> str | None:
+        if not value:
+            return None
+        if self.media_url_resolver is not None:
+            value = self.media_url_resolver(value) or ""
+        if value.startswith(("https://", "http://", "data:")):
+            return value
+        return None
+
+    def _request(
+        self,
+        inputs: Sequence[dict[str, str]],
+        *,
+        task: str,
+    ) -> list[tuple[float, ...]]:
+        if not inputs:
+            return []
+        payload: dict[str, object] = {
+            "model": self.config.model,
+            "normalized": True,
+            "embedding_type": "float",
+            "task": task,
+            "input": list(inputs),
+        }
+        if self.config.dimensions is not None:
+            payload["dimensions"] = self.config.dimensions
+        response = self.transport.post_json(
+            self.config.url,
+            headers={
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Content-Type": "application/json",
+            },
+            payload=payload,
+            timeout=self.config.timeout_seconds,
+        )
+        return _parse_embeddings(response, expected=len(inputs))
+
+
+def _parse_embeddings(
+    response: Mapping[str, Any],
+    *,
+    expected: int,
+) -> list[tuple[float, ...]]:
+    data = response.get("data")
+    if not isinstance(data, list):
+        raise EmbeddingAPIError("embedding API response is missing data")
+    indexed: dict[int, tuple[float, ...]] = {}
+    for fallback_index, row in enumerate(data):
+        if not isinstance(row, Mapping):
+            raise EmbeddingAPIError("embedding API data entries must be objects")
+        index = int(row.get("index", fallback_index))
+        embedding = row.get("embedding")
+        if not isinstance(embedding, Sequence) or isinstance(embedding, (str, bytes)):
+            raise EmbeddingAPIError("embedding API entry is missing a vector")
+        try:
+            vector = tuple(float(value) for value in embedding)
+        except (TypeError, ValueError) as exc:
+            raise EmbeddingAPIError("embedding API returned a non-numeric vector") from exc
+        if not vector or not all(math.isfinite(value) for value in vector):
+            raise EmbeddingAPIError("embedding API returned an invalid vector")
+        indexed[index] = vector
+    if set(indexed) != set(range(expected)):
+        raise EmbeddingAPIError(
+            f"embedding API returned {len(indexed)} vectors for {expected} inputs"
+        )
+    dimensions = {len(vector) for vector in indexed.values()}
+    if len(dimensions) != 1:
+        raise EmbeddingAPIError("embedding API returned inconsistent dimensions")
+    return [indexed[index] for index in range(expected)]
+
+
+def _mean_unit_vector(vectors: Sequence[Sequence[float]]) -> tuple[float, ...]:
+    normalized = [_unit_vector(vector) for vector in vectors]
+    dimension = len(normalized[0])
+    if any(len(vector) != dimension for vector in normalized):
+        raise EmbeddingAPIError("cannot combine vectors with different dimensions")
+    mean = tuple(
+        sum(vector[index] for vector in normalized) / len(normalized)
+        for index in range(dimension)
+    )
+    return _unit_vector(mean)
+
+
+def _extra_string(chunk: Chunk, key: str) -> str | None:
+    value = chunk.extra.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _is_retryable_httpx_error(httpx: Any, exc: Exception) -> bool:
+    if isinstance(exc, httpx.RequestError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status in {408, 425, 429} or status >= 500
+    return False
+
+
+def _int_env(values: Mapping[str, str], key: str, default: int) -> int:
+    try:
+        return int(values.get(key, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{key} must be an integer") from exc
+
+
+def _float_env(values: Mapping[str, str], key: str, default: float) -> float:
+    try:
+        return float(values.get(key, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{key} must be numeric") from exc
+
+
+def _unit_vector(vector: Sequence[float]) -> tuple[float, ...]:
+    norm = math.sqrt(sum(float(value) ** 2 for value in vector))
+    if norm == 0 or not math.isfinite(norm):
+        raise EmbeddingAPIError("embedding vector cannot be normalized")
+    return tuple(float(value) / norm for value in vector)

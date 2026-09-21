@@ -10,7 +10,7 @@
 
 ```text
 向量召回 top-N ─┐
-                 ├─ weighted RRF ─> 候选 top-N ─> CrossEncoder Rerank ─> top-k 上下文
+                 ├─ weighted RRF ─> 候选 top-N ─> Jina Rerank ─> top-k 上下文
 BM25 召回 top-N ┘
 ```
 
@@ -18,12 +18,16 @@ RRF 只使用排名而不直接比较不同检索器的原始分数，避免余�
 
 ### Rerank
 
-`CrossEncoderReranker` 默认使用 `BAAI/bge-reranker-v2-m3`，对 query-document 对重新打分，再保留最终 top-k。模型依赖是可选的，未安装时可以用 `NoOpReranker` 跑通本地闭环。生产环境建议：
+生产默认使用 `JinaReranker` 调用 `jina-reranker-v3`，对 query-document
+候选重新打分，再保留最终 top-k。`CrossEncoderReranker` 仍保留为本地兼容实现，
+但不属于当前生产路径；未配置 API 时可以用 `NoOpReranker` 跑通本地闭环。生产环境建议：
 
-- 召回 top-50～top-100，再进行一次 CrossEncoder 精排；
+- 召回 top-50～top-100，再进行一次 Jina 精排；
 - 通过离线评估集调节 `top_k` 和相关性阈值；
-- 将模型加载放在 worker 启动阶段，避免每个请求重复加载；
-- 对模型版本、设备和批大小做配置并记录在实验报告中。
+- 将 API Key 只放在环境变量中，不写入日志；
+- 对模型版本、请求延迟、API 限流和线上费用做记录；
+- 图片、音频和视频的多模态内容由 Jina Embeddings 在向量召回阶段处理；Jina
+  `jina-reranker-v3` 精排阶段使用 Chunk 中的转写和描述文本。
 
 ### 生成与引用
 
@@ -61,7 +65,7 @@ from rag_engine.retrieval import BM25Retriever, HybridRetriever
 
 vector = QdrantVectorRetriever(
     QdrantClient(url="http://localhost:6333"),
-    collection_name="chunks",
+    collection_name="jina_v5_omni_small_1024",
     embed_query=embedding_service.embed_query,
     vector_name="dense",
 )
@@ -75,13 +79,13 @@ retriever = HybridRetriever(bm25, vector, candidate_k=50)
 ```python
 from rag_engine.llm import OpenAICompatibleChatModel, OpenAICompatibleConfig
 from rag_engine.pipeline import RAGPipeline
-from rag_engine.rerank import CrossEncoderReranker
+from rag_engine.rerank import JinaRerankConfig, JinaReranker
 
 model = OpenAICompatibleChatModel(OpenAICompatibleConfig.from_env())
 pipeline = RAGPipeline(
     retriever,
     model,
-    reranker=CrossEncoderReranker(),
+    reranker=JinaReranker(JinaRerankConfig.from_env()),
     retrieval_k=50,
     answer_k=8,
 )
@@ -105,5 +109,5 @@ Faithfulness 需要人工标注或独立评审模型，不能仅由检索命中�
 
 - [Qdrant Hybrid Queries](https://qdrant.tech/documentation/search/hybrid-queries/)：dense/sparse 多路查询与 RRF 融合；
 - [Qdrant Hybrid Search with Reranking](https://qdrant.tech/documentation/tutorials-basics/reranking-hybrid-search/)：先召回再重排的多阶段检索模式；
-- [Sentence Transformers CrossEncoder](https://www.sbert.net/docs/package_reference/cross_encoder/modules.html)：交叉编码器相关性打分接口；
-- [BAAI/bge-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3)：多语言 Rerank 模型卡与部署说明。
+- [Jina Embeddings](https://jina.ai/en-US/embeddings/)：文本、图片、音频和视频的共享向量空间；
+- [Jina Rerank API](https://jina.ai/?model=jina-reranker-v3)：文本候选的二阶段重排序。

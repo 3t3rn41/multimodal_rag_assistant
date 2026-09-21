@@ -41,7 +41,7 @@ class OpenAICompatibleConfig:
 
 
 class OpenAICompatibleChatModel:
-    """Stream ``/chat/completions`` from OpenAI, Qwen, GLM, or compatible APIs."""
+    """Stream ``/chat/completions`` from an OpenAI-compatible API."""
 
     def __init__(self, config: OpenAICompatibleConfig) -> None:
         self.config = config
