@@ -1,44 +1,51 @@
-# Embedding 模型选型与 API 接入
+# SiliconFlow Qwen 多模态 Embedding 与 Rerank
 
 ## 结论
 
-本项目采用 API-first：运行时不下载或加载本地 embedding 模型，统一由
-`ApiMultimodalEmbedder` 调用一个能同时接受文本和图片的 embedding API。默认配置
-是 Jina AI 的 `jina-clip-v2` 接口；真正的 URL、模型名、维度和 Token 都从环境变量
-读取，后续可以替换为团队购买的兼容服务。
+项目运行时统一使用硅基流动 API，不下载或加载本地 Embedding/Rerank 模型：
 
-选择默认方案的原因是文本和图片必须落在同一个向量空间。`jina-clip-v2` 官方模型卡
-说明它是文本/图片多模态 embedding，文本塔支持 89 种语言，输出维度可以在 64 到
-1024 之间截断，并给出了 `/v1/embeddings` 的文本与图片混合请求格式。生产环境应
-根据实际 API 账单、延迟、数据合规和模型许可重新验收，不能把官方模型卡的 benchmark
-数字当成本项目的线上指标。
+- Embedding：`Qwen/Qwen3-VL-Embedding-8B`，请求
+  `https://api.siliconflow.cn/v1/embeddings`；
+- Rerank：`Qwen/Qwen3-VL-Reranker-8B`，请求
+  `https://api.siliconflow.cn/v1/rerank`。
 
-## 对比
+硅基流动官方 Embedding 文档明确支持文本、图片 URL/base64 和混合输入；官方当前
+也明确注明 VL Embedding 暂不支持直接输入视频。因此视频先由 FFmpeg 抽取代表帧，
+音频先由转写 API 变成带时间戳文本，再进入统一的 Chunk 检索链路。
 
-| 方案 | 跨模态 | 中文/多语言 | 向量与部署特点 | 本项目结论 |
-| --- | --- | --- | --- | --- |
-| OpenAI CLIP | 文本 + 图片 | 原始方案不以中文检索为目标 | 开源代码和多种视觉骨干，但需要自己托管；官方 model card 将其定位为研究输出 | 保留为研究基线，不作为默认生产 API |
-| BGE-M3 | 文本 dense/sparse/ColBERT | 100+ 语言，最长 8192 token，1024 维 | 很适合中文文本与混合词法检索，但本身不是图片编码器 | 文本-only 或独立文本集合可选；不能单独满足图文同空间 |
-| Jina CLIP v2 API | 文本 + 图片 | 官方模型卡标注 89 种语言 | 64–1024 维可选；API 可直接混合 `text` 与 `image` 输入 | 默认方案，文本/图片/视频代表帧共享一个 API 向量空间 |
+## 输入路由
 
-来源：
+| Chunk 类型 | Embedding API 输入 | Rerank API 文档输入 |
+| --- | --- | --- |
+| `document` | `{"text": content}` | `{"text": content}` |
+| `image` | 文本描述 + `{"image": media_url}`，向量归一化后取均值 | `{"image": media_url}` |
+| `audio` | `{"text": content}`，内容来自带时间戳 ASR | `{"text": content}` |
+| `video` | 融合文本 + 代表帧 `{"image": media_url}` | `{"image": media_url}` |
 
-- [Jina CLIP v2 官方模型卡](https://huggingface.co/jinaai/jina-clip-v2)
-- [BGE-M3 官方模型卡](https://huggingface.co/BAAI/bge-m3)
-- [OpenAI CLIP 官方仓库与 model card](https://github.com/openai/CLIP/blob/main/model-card.md)
+官方 Rerank 请求的多模态文档项是文本或图片对象，当前不把一个文档拼成未被官方
+文档声明的混合对象。因此图片/视频优先发送代表图像，语音内容已经保留在 Chunk
+文本中并参与 Embedding/BM25；需要同时让 Rerank 看语音和画面时，应用层可将转写
+内容拼入查询，或在后续升级时按 API 新能力扩展。
 
-## Chunk 到 API 输入的规则
+私有 `minio://` 路径必须由应用层回调转换成短时 presigned HTTPS URL，避免把内部
+对象存储地址直接发给硅基流动。没有可访问的媒体 URL 时，代码会安全回退到文本
+描述，而不是发送本地路径。
 
-- `document`、`audio`：把 `content` 作为 `{"text": ...}`；音频先由转写 API 生成带时间戳文本。
-- `image`：同时发送图片描述文本和 `media_path` 图片 URL，两个向量 L2 归一化后取均值，再归一化。
-- `video`：发送融合后的语音/画面描述文本，以及一个代表帧 URL；时间轴仍保留在 Chunk 元数据中。
-- `media_path` 为 `minio://` 时，必须由应用层回调换成短时 presigned HTTPS URL；不会把私有
-  MinIO 地址直接发给第三方 API。
+## 配置
 
-API 返回的所有向量必须维度一致。写入 Qdrant 前会检查数量、维度、空向量和 NaN/Inf，
-中断后通过 Chunk ID 跳过已存在记录，并在批处理结束后再次做一致性校验。
+```bash
+SILICONFLOW_API_KEY=填入你的 Key
+RAG_EMBEDDING_MODEL=Qwen/Qwen3-VL-Embedding-8B
+RAG_RERANK_MODEL=Qwen/Qwen3-VL-Reranker-8B
+```
 
-## 运行配置
+Embedding 的 `RAG_EMBEDDING_DIMENSIONS` 可留空，使用 API 返回的原生维度；如果
+服务端支持并且团队已经确定 Qdrant 集合维度，再显式填写。Embedding、Rerank 的
+请求地址、超时和 provider-specific Key 都可以通过 [`.env.example`](../.env.example)
+覆盖。
 
-复制 `.env.example` 后填写 `RAG_EMBEDDING_API_KEY`。不要把真实 Token 写进仓库；
-批量入库命令见 `scripts/index_chunks.py`。
+## 官方依据
+
+- [SiliconFlow 创建嵌入请求](https://api-docs.siliconflow.cn/docs/api/embeddings-post)
+- [SiliconFlow 创建重排序请求](https://api-docs.siliconflow.cn/docs/api/rerank-post)
+- [SiliconFlow 获取用户模型列表](https://api-docs.siliconflow.cn/docs/api/models-get)

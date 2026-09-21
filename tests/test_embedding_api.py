@@ -55,14 +55,15 @@ class ApiMultimodalEmbedderTests(unittest.TestCase):
 
         loaded = MultimodalEmbeddingAPIConfig.from_env(
             {
-                "RAG_EMBEDDING_API_KEY": "secret",
+                "RAG_EMBEDDING_API_KEY": "",
+                "SILICONFLOW_API_KEY": "secret",
                 "RAG_EMBEDDING_API_URL": "https://example.test/embed",
-                "RAG_EMBEDDING_MODEL": "model-a",
-                "RAG_EMBEDDING_DIMENSIONS": "512",
+                "RAG_EMBEDDING_MODEL": "Qwen/Qwen3-VL-Embedding-8B",
             }
         )
         self.assertEqual(loaded.api_key, "secret")
-        self.assertEqual(loaded.dimensions, 512)
+        self.assertEqual(loaded.model, "Qwen/Qwen3-VL-Embedding-8B")
+        self.assertIsNone(loaded.dimensions)
 
     def test_chunks_use_text_and_media_in_one_embedding_space(self) -> None:
         # Inputs are: document text, image text, image URL, audio text,
@@ -108,7 +109,7 @@ class ApiMultimodalEmbedderTests(unittest.TestCase):
         payload = transport.calls[0]["payload"]
         self.assertEqual(payload["model"], "multimodal-model")
         self.assertEqual(payload["dimensions"], 2)
-        self.assertEqual(payload["task"], "retrieval.passage")
+        self.assertEqual(payload["encoding_format"], "float")
         self.assertEqual(
             payload["input"],
             [
@@ -122,14 +123,17 @@ class ApiMultimodalEmbedderTests(unittest.TestCase):
         )
         self.assertEqual(transport.calls[0]["headers"]["Authorization"], "Bearer test-token")
 
-    def test_query_uses_query_task(self) -> None:
+    def test_query_uses_same_multimodal_endpoint(self) -> None:
         transport = RecordingTransport([[0.25, 0.75]])
         provider = ApiMultimodalEmbedder(config(), transport=transport)
 
         vector = provider.embed_query("视频里讲了什么？")
 
         self.assertEqual(vector, [0.25, 0.75])
-        self.assertEqual(transport.calls[0]["payload"]["task"], "retrieval.query")
+        self.assertEqual(
+            transport.calls[0]["payload"]["input"],
+            [{"text": "视频里讲了什么？"}],
+        )
 
     def test_non_http_media_can_be_resolved_to_presigned_url(self) -> None:
         transport = RecordingTransport([[1, 0], [0, 1]])

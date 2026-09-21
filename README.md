@@ -32,8 +32,8 @@
 | 后端 API | 用户、文件、知识库、任务、对话和 Chunk 溯源接口 | FastAPI、分层架构、SSE |
 | 异步任务 | 文档解析、媒体处理、向量化和重试 | Celery + Redis；评估 Dramatiq/arq |
 | 数据处理 | PDF/Word/图片/音视频解析、清洗、切片和多模态对齐 | `ingestion/` 契约层；可接 PyMuPDF、Unstructured、FFmpeg、Whisper、OCR |
-| 向量与检索 | API 多模态 Embedding、向量入库、向量检索、BM25、RRF | Qdrant（优先）或 Milvus；Embedding 由外部图文 API 提供 |
-| 生成与评估 | Query 改写、Rerank、Prompt、流式生成、效果评估 | bge-reranker、可配置的大模型 API |
+| 向量与检索 | API 多模态 Embedding、向量入库、向量检索、BM25、RRF | Qdrant（优先）或 Milvus；SiliconFlow Qwen VL API |
+| 生成与评估 | Query 改写、Rerank、Prompt、流式生成、效果评估 | SiliconFlow Qwen VL Reranker、可配置的大模型 API |
 | 基础设施 | 关系数据、对象存储、服务编排与部署 | MySQL、MinIO、Docker Compose |
 
 ### 数据流与异步任务
@@ -144,7 +144,7 @@ celery-worker · celery-beat（按需启用）
 
 - BM25 + 向量检索 + 加权 RRF 混合召回；
 - Qdrant `query_points` 适配器；
-- `BAAI/bge-reranker-v2-m3` CrossEncoder Rerank 适配器；
+- SiliconFlow `Qwen/Qwen3-VL-Reranker-8B` API Rerank 适配器；
 - OpenAI-compatible 多厂商流式模型适配；
 - 可信 Chunk 白名单校验与结构化引用；
 - 评估数据集、Precision/Recall/Hit Rate/MRR/Citation Accuracy 指标和回归脚本。
@@ -158,9 +158,10 @@ python -m unittest discover -s tests -v
 成员 B 的数据解析、切片、时间对齐与向量入库接入说明见
 [`docs/member-b-data.md`](./docs/member-b-data.md)。
 
-成员 B 的向量化实现是 API-only：不会在本地下载或加载 Embedding 模型。复制
+成员 B 的向量化实现是 API-only：不会在本地下载或加载 Embedding 模型，默认使用
+SiliconFlow `Qwen/Qwen3-VL-Embedding-8B`。复制
 [`.env.example`](./.env.example) 并填写 `RAG_EMBEDDING_API_URL`、
-`RAG_EMBEDDING_API_KEY`、模型名和维度后，可用
+`SILICONFLOW_API_KEY`、模型名和可选维度后，可用
 `python -m scripts.index_chunks` 批量写入 Qdrant；中断重跑会按 `chunk_id` 跳过已入库数据。
 模型比较和输入路由规则见
 [`docs/embedding-model-selection.md`](./docs/embedding-model-selection.md)。

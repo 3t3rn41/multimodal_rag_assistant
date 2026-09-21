@@ -2,8 +2,8 @@
 
 成员 B 的实现位于 `ingestion/`，输出直接复用成员 C 的
 `rag_engine.models.Chunk`，因此不需要改动 `BM25Retriever`、`HybridRetriever`
-或 `QdrantVectorRetriever`。Embedding 不在本地加载模型，统一调用由环境变量
-配置的多模态 API，示例配置见 `.env.example`，模型取舍见
+或 `QdrantVectorRetriever`。Embedding 不在本地加载模型，统一调用硅基流动的
+`Qwen/Qwen3-VL-Embedding-8B` API，示例配置见 `.env.example`，模型取舍见
 [`embedding-model-selection.md`](./embedding-model-selection.md)。
 
 ## 与成员 C 的契约
@@ -69,7 +69,8 @@ report = index_chunks(chunks, provider, writer, batch_size=64)
 
 生产 API 入口是 `ApiMultimodalEmbedder`：文档和音频发送文本，图片和视频发送
 融合文本及可访问的图片 URL；私有 `minio://` 路径必须由应用层转换为短时
-presigned HTTPS URL。`scripts/index_chunks.py` 支持已入库 Chunk 跳过、批量写入
+presigned HTTPS URL。硅基流动 VL Embedding 暂不直接接收视频，所以视频使用
+代表帧。`scripts/index_chunks.py` 支持已入库 Chunk 跳过、批量写入
 和结束后的一致性检查：
 
 ```bash

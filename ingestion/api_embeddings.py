@@ -1,4 +1,10 @@
-"""API-only multimodal embeddings for text, image, audio, and video chunks."""
+"""API-only multimodal embeddings for text, image, audio, and video chunks.
+
+The production configuration targets SiliconFlow's Qwen3-VL-Embedding API.
+Audio and video chunks are represented by transcript text and representative
+video frames because the embedding endpoint currently accepts text and images,
+not raw audio or video.
+"""
 
 from __future__ import annotations
 
@@ -64,15 +70,13 @@ class HttpxJsonTransport:
 
 @dataclass(frozen=True, slots=True)
 class MultimodalEmbeddingAPIConfig:
-    """Configuration for a Jina-compatible multimodal embedding endpoint."""
+    """Configuration for SiliconFlow's OpenAI-shaped embedding endpoint."""
 
     url: str
     api_key: str
-    model: str = "jina-clip-v2"
-    dimensions: int = 1_024
+    model: str = "Qwen/Qwen3-VL-Embedding-8B"
+    dimensions: int | None = None
     timeout_seconds: float = 60.0
-    passage_task: str = "retrieval.passage"
-    query_task: str = "retrieval.query"
 
     def __post_init__(self) -> None:
         if not self.url.strip():
@@ -81,7 +85,7 @@ class MultimodalEmbeddingAPIConfig:
             raise ValueError("embedding API key must not be empty")
         if not self.model.strip():
             raise ValueError("embedding model must not be empty")
-        if self.dimensions <= 0:
+        if self.dimensions is not None and self.dimensions <= 0:
             raise ValueError("embedding dimensions must be positive")
         if self.timeout_seconds <= 0 or not math.isfinite(self.timeout_seconds):
             raise ValueError("embedding timeout must be a finite positive number")
@@ -94,11 +98,16 @@ class MultimodalEmbeddingAPIConfig:
         """Load API settings without reading or logging any secret value."""
 
         values = os.environ if env is None else env
-        api_key = values.get("RAG_EMBEDDING_API_KEY", "").strip()
+        api_key = values.get("RAG_EMBEDDING_API_KEY", "").strip() or values.get(
+            "SILICONFLOW_API_KEY", ""
+        ).strip()
         if not api_key:
-            raise ValueError("RAG_EMBEDDING_API_KEY is required")
+            raise ValueError(
+                "RAG_EMBEDDING_API_KEY or SILICONFLOW_API_KEY is required"
+            )
         try:
-            dimensions = int(values.get("RAG_EMBEDDING_DIMENSIONS", "1024"))
+            raw_dimensions = values.get("RAG_EMBEDDING_DIMENSIONS", "").strip()
+            dimensions = int(raw_dimensions) if raw_dimensions else None
             timeout = float(values.get("RAG_EMBEDDING_TIMEOUT_SECONDS", "60"))
         except ValueError as exc:
             raise ValueError(
@@ -108,17 +117,15 @@ class MultimodalEmbeddingAPIConfig:
         return cls(
             url=values.get(
                 "RAG_EMBEDDING_API_URL",
-                "https://api.jina.ai/v1/embeddings",
+                "https://api.siliconflow.cn/v1/embeddings",
             ),
             api_key=api_key,
-            model=values.get("RAG_EMBEDDING_MODEL", "jina-clip-v2"),
+            model=values.get(
+                "RAG_EMBEDDING_MODEL",
+                "Qwen/Qwen3-VL-Embedding-8B",
+            ),
             dimensions=dimensions,
             timeout_seconds=timeout,
-            passage_task=values.get(
-                "RAG_EMBEDDING_PASSAGE_TASK",
-                "retrieval.passage",
-            ),
-            query_task=values.get("RAG_EMBEDDING_QUERY_TASK", "retrieval.query"),
         )
 
 
@@ -142,18 +149,15 @@ class ApiMultimodalEmbedder:
         self.media_url_resolver = media_url_resolver
 
     def embed(self, texts: Sequence[str]) -> list[tuple[float, ...]]:
-        """Embed corpus text with the configured passage task."""
+        """Embed corpus text through the configured multimodal API."""
 
         inputs = [{"text": text} for text in texts]
-        return self._request(inputs, task=self.config.passage_task)
+        return self._request(inputs)
 
     def embed_query(self, text: str) -> list[float]:
         """Embed a retrieval query for member C's Qdrant adapter."""
 
-        vectors = self._request(
-            [{"text": text}],
-            task=self.config.query_task,
-        )
+        vectors = self._request([{"text": text}])
         return list(vectors[0])
 
     def embed_chunks(self, chunks: Sequence[Chunk]) -> list[tuple[float, ...]]:
@@ -174,7 +178,7 @@ class ApiMultimodalEmbedder:
                 raise ValueError(f"chunk {chunk.chunk_id!r} has no embeddable content")
             groups.append(indexes)
 
-        vectors = self._request(inputs, task=self.config.passage_task)
+        vectors = self._request(inputs)
         return [_mean_unit_vector([vectors[index] for index in group]) for group in groups]
 
     def _media_url(self, chunk: Chunk) -> str | None:
@@ -190,19 +194,16 @@ class ApiMultimodalEmbedder:
     def _request(
         self,
         inputs: Sequence[dict[str, str]],
-        *,
-        task: str,
     ) -> list[tuple[float, ...]]:
         if not inputs:
             return []
         payload: dict[str, object] = {
             "model": self.config.model,
-            "dimensions": self.config.dimensions,
-            "task": task,
-            "normalized": True,
-            "embedding_type": "float",
+            "encoding_format": "float",
             "input": list(inputs),
         }
+        if self.config.dimensions is not None:
+            payload["dimensions"] = self.config.dimensions
         response = self.transport.post_json(
             self.config.url,
             headers={
