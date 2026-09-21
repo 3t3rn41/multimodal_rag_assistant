@@ -109,7 +109,7 @@ class MediaPipelineTests(unittest.TestCase):
         self.assertIn("frame_000001", chunks[0].content)
         self.assertEqual(chunks[1].time_start, 31)
         self.assertEqual(
-            chunks[0].extra["source_media_path"],
+            Path(chunks[0].extra["source_media_path"]).name,
             "clip-2-9.mp4",
         )
         self.assertEqual(

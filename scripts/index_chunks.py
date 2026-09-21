@@ -13,6 +13,7 @@ from ingestion import (
     ApiMultimodalEmbedder,
     MultimodalEmbeddingAPIConfig,
     QdrantVectorWriter,
+    ensure_qdrant_collection,
     index_chunks,
 )
 from rag_engine.models import Chunk
@@ -43,9 +44,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chunks", type=Path, required=True)
     parser.add_argument("--qdrant-url", default=os.getenv("RAG_QDRANT_URL", "http://localhost:6333"))
-    parser.add_argument("--collection", default=os.getenv("RAG_QDRANT_COLLECTION", "chunks"))
+    parser.add_argument(
+        "--collection",
+        default=os.getenv("RAG_QDRANT_COLLECTION", "jina_v5_omni_small_1024"),
+    )
     parser.add_argument("--vector-name", default=os.getenv("RAG_QDRANT_VECTOR_NAME", "dense"))
+    parser.add_argument(
+        "--embedding-dimensions",
+        type=int,
+        default=int(os.getenv("RAG_EMBEDDING_DIMENSIONS", "1024")),
+    )
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="recreate the named Jina collection before indexing every input chunk",
+    )
     return parser
 
 
@@ -57,12 +71,24 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise SystemExit("install the 'qdrant' optional dependency first") from exc
 
     chunks = read_chunks(args.chunks)
+    embedding_config = MultimodalEmbeddingAPIConfig.from_env()
+    dimensions = embedding_config.dimensions or args.embedding_dimensions
+    if dimensions <= 0:
+        raise SystemExit("embedding dimensions must be positive")
     provider = ApiMultimodalEmbedder(
-        MultimodalEmbeddingAPIConfig.from_env(),
+        embedding_config,
         media_url_resolver=_media_url_resolver,
     )
+    client = QdrantClient(url=args.qdrant_url)
+    ensure_qdrant_collection(
+        client,
+        args.collection,
+        dimensions,
+        vector_name=args.vector_name or None,
+        recreate=args.rebuild,
+    )
     writer = QdrantVectorWriter(
-        QdrantClient(url=args.qdrant_url),
+        client,
         args.collection,
         vector_name=args.vector_name or None,
     )

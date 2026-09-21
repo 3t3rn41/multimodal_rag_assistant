@@ -162,7 +162,9 @@ python -m unittest discover -s tests -v
 Jina `jina-embeddings-v5-omni-small`。复制
 [`.env.example`](./.env.example) 并填写 `RAG_EMBEDDING_API_URL`、
 `JINA_API_KEY`、模型名和可选维度后，可用
-`python -m scripts.index_chunks` 批量写入 Qdrant；中断重跑会按 `chunk_id` 跳过已入库数据。
+`python -m scripts.index_chunks --rebuild` 会在 Jina 专用的
+`jina_v5_omni_small_1024` 集合中全量重建索引；普通运行支持断点续传并按持久化
+UUID 跳过已入库数据。
 模型比较和输入路由规则见
 [`docs/embedding-model-selection.md`](./docs/embedding-model-selection.md)。
 
@@ -176,6 +178,10 @@ Jina `jina-embeddings-v5-omni-small`。复制
 - `chunk_media`：按时间窗融合 ASR 文本和视频帧描述；转写只归属一个窗口，引用时间使用实际证据边界；
 - `ApiMultimodalEmbedder`：通过 Jina v5-omni Embedding API 统一处理文本、图片、原始音频、原始视频和代表帧；
 - `index_chunks`：批量校验向量、支持断点续传，并通过 `QdrantVectorWriter` 写入向量库。
+
+Embedding 请求显式使用 `normalized=true` 和 `embedding_type=float`，网络错误及
+429/5xx 等临时错误会按指数退避重试。媒体流水线会先按 Chunk 的时间范围裁剪音频/视频，
+再将裁剪后的路径交给 Embedding API。
 
 切片时会为每个 Chunk 生成并持久化随机 UUID4 到
 `extra["qdrant_point_id"]`；Qdrant 断点索引只接受该 UUID，不会从业务 ID 计算哈希。

@@ -22,7 +22,8 @@ Jina `v5-omni` 将文本、图片、音频、视频和 PDF 放入共享向量空
 | `audio` | `{"text": content}` + `{"audio": media_url}` | `content` |
 | `video` | 融合文本 + `{"video": media_url}` + 可选 `{"image": frame_url}` | `content` |
 
-Embedding 请求使用 `retrieval.passage`；查询向量使用 `retrieval.query`。Rerank
+Embedding 请求使用 `retrieval.passage`；查询向量使用 `retrieval.query`，并显式发送
+`normalized: true` 与 `embedding_type: "float"`。Rerank
 阶段使用 `content` 中已经对齐的转写和画面描述，避免把本地文件路径直接发给文本
 重排模型。
 

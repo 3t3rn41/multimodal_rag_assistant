@@ -199,6 +199,53 @@ class QdrantVectorWriter:
         return existing
 
 
+def ensure_qdrant_collection(
+    client: Any,
+    collection_name: str,
+    dimensions: int,
+    *,
+    vector_name: str | None = None,
+    recreate: bool = False,
+) -> None:
+    """Create a dimension-safe collection for the selected Jina model.
+
+    ``recreate=True`` is intentionally limited to the exact collection name
+    supplied by the caller and is used by the full rebuild command. It never
+    deletes the previous generic collection unless the caller explicitly
+    points at it.
+    """
+
+    if not collection_name.strip():
+        raise ValueError("collection_name must not be empty")
+    if dimensions <= 0:
+        raise ValueError("dimensions must be positive")
+    try:
+        from qdrant_client import models
+    except ImportError as exc:  # pragma: no cover - optional integration
+        raise RuntimeError(
+            "Qdrant collection management requires the 'qdrant' optional dependency"
+        ) from exc
+
+    exists = bool(client.collection_exists(collection_name=collection_name))
+    if exists and recreate:
+        client.delete_collection(collection_name=collection_name)
+        exists = False
+    if exists:
+        return
+
+    vector_params = models.VectorParams(
+        size=dimensions,
+        distance=models.Distance.COSINE,
+    )
+    vectors_config = (
+        {vector_name: vector_params} if vector_name else vector_params
+    )
+    client.create_collection(
+        collection_name=collection_name,
+        vectors_config=vectors_config,
+    )
+
+
 def _normalize_vector(vector: Sequence[float]) -> tuple[float, ...]:
     try:
         normalized = tuple(float(value) for value in vector)

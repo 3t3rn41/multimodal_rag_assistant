@@ -7,9 +7,11 @@ import mimetypes
 import os
 import subprocess
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
+
+from rag_engine.models import Chunk
 
 from .api_embeddings import HttpxJsonTransport, JsonTransport
 from .chunking import chunk_media
@@ -32,6 +34,26 @@ class MediaExtractor(Protocol):
         *,
         interval_seconds: float,
     ) -> list[FrameSample]: ...
+
+    def clip_media(
+        self,
+        media_path: Path,
+        output_dir: Path,
+        *,
+        start_seconds: float,
+        end_seconds: float,
+    ) -> Path: ...
+
+
+class MediaClipper(Protocol):
+    def clip_media(
+        self,
+        media_path: Path,
+        output_dir: Path,
+        *,
+        start_seconds: float,
+        end_seconds: float,
+    ) -> Path: ...
 
 
 class Transcriber(Protocol):
@@ -100,6 +122,41 @@ class FFmpegMediaExtractor:
             FrameSample(index * interval_seconds, path)
             for index, path in enumerate(paths)
         ]
+
+    def clip_media(
+        self,
+        media_path: Path,
+        output_dir: Path,
+        *,
+        start_seconds: float,
+        end_seconds: float,
+    ) -> Path:
+        if start_seconds < 0 or end_seconds <= start_seconds:
+            raise ValueError("media clip must have a positive time range")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        duration = end_seconds - start_seconds
+        output = output_dir / (
+            f"{media_path.stem}_{start_seconds:g}-{end_seconds:g}"
+            f"{media_path.suffix or '.mp4'}"
+        )
+        self._run(
+            [
+                self.ffmpeg_binary,
+                "-y",
+                "-ss",
+                f"{start_seconds:.3f}",
+                "-i",
+                str(media_path),
+                "-t",
+                f"{duration:.3f}",
+                "-c",
+                "copy",
+                "-avoid_negative_ts",
+                "make_zero",
+                str(output),
+            ]
+        )
+        return output
 
     def _run(self, command: list[str]) -> None:
         try:
@@ -306,14 +363,14 @@ class VideoIngestionPipeline:
             )
             for frame in frames
         ]
-        return chunk_media(
+        chunks = chunk_media(
             file_id,
             transcripts,
             descriptions,
             source_type="video",
             window_seconds=window_seconds,
-            source_media_path=str(video_path),
         )
+        return _clip_chunks(chunks, video_path, work_dir, self.extractor)
 
 
 def ingest_audio(
@@ -322,17 +379,61 @@ def ingest_audio(
     file_id: str,
     transcriber: Transcriber,
     window_seconds: float = 30.0,
+    media_clipper: MediaClipper | None = None,
+    work_dir: Path | None = None,
 ):
     """Transcribe audio and reuse the same timestamped media fusion contract."""
 
-    return chunk_media(
+    chunks = chunk_media(
         file_id,
         transcriber.transcribe(audio_path),
         [],
         source_type="audio",
         window_seconds=window_seconds,
-        source_media_path=str(audio_path),
     )
+    clipper = media_clipper or FFmpegMediaExtractor()
+    return _clip_chunks(
+        chunks,
+        audio_path,
+        work_dir or audio_path.parent,
+        clipper,
+    )
+
+
+def _clip_chunks(
+    chunks: list[Chunk],
+    source_path: Path,
+    output_dir: Path,
+    clipper: MediaClipper,
+) -> list[Chunk]:
+    clipped: list[Chunk] = []
+    for chunk in chunks:
+        start_seconds, end_seconds = _clip_bounds(chunk)
+        clip_path = clipper.clip_media(
+            source_path,
+            output_dir,
+            start_seconds=start_seconds,
+            end_seconds=end_seconds,
+        )
+        extra = dict(chunk.extra)
+        extra["source_media_path"] = str(clip_path)
+        extra["original_media_path"] = str(source_path)
+        media_path = str(clip_path) if chunk.source_type == "audio" else chunk.media_path
+        clipped.append(replace(chunk, media_path=media_path, extra=extra))
+    return clipped
+
+
+def _clip_bounds(chunk: Chunk) -> tuple[float, float]:
+    start = chunk.time_start
+    end = chunk.time_end
+    if start is not None and end is not None and end > start:
+        return float(start), float(end)
+    window_start = chunk.extra.get("window_start")
+    window_end = chunk.extra.get("window_end")
+    if isinstance(window_start, (int, float)) and isinstance(window_end, (int, float)):
+        if window_end > window_start:
+            return float(window_start), float(window_end)
+    raise ValueError(f"chunk {chunk.chunk_id!r} has no positive media time range")
 
 
 def _image_reference(image: str | Path) -> str:

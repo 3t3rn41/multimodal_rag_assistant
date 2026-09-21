@@ -47,8 +47,10 @@ chunks = chunk_media(
 
 `PyMuPDFParser`、`DocxParser`、`FFmpegMediaExtractor`、`ApiTranscriber` 和
 `ApiImageCaptioner` 已提供适配边界；PDF 解析依赖可选的 PyMuPDF，音视频依赖系统
-FFmpeg，转写和图片描述依赖你填写的 API。这样切片/对齐测试不需要下载模型，也不
-会把真实 Token 写入仓库。
+FFmpeg，转写和图片描述依赖你填写的 API。媒体流水线会按每个 Chunk 的实际
+`time_start/time_end` 生成裁剪文件，并把裁剪路径写入
+`extra["source_media_path"]`；只有单帧证据没有正时长时才回退到所属检索窗口。
+这样切片/对齐测试不需要下载模型，也不会把真实 Token 写入仓库。
 
 ## 向量化入库
 
@@ -57,11 +59,19 @@ from ingestion import (
     ApiMultimodalEmbedder,
     MultimodalEmbeddingAPIConfig,
     QdrantVectorWriter,
+    ensure_qdrant_collection,
     index_chunks,
 )
 
-provider = ApiMultimodalEmbedder(MultimodalEmbeddingAPIConfig.from_env())
-writer = QdrantVectorWriter(client, "chunks", vector_name="dense")
+config = MultimodalEmbeddingAPIConfig.from_env()
+ensure_qdrant_collection(
+    client,
+    "jina_v5_omni_small_1024",
+    config.dimensions or 1024,
+    vector_name="dense",
+)
+provider = ApiMultimodalEmbedder(config)
+writer = QdrantVectorWriter(client, "jina_v5_omni_small_1024", vector_name="dense")
 report = index_chunks(chunks, provider, writer, batch_size=64)
 ```
 
@@ -72,13 +82,20 @@ report = index_chunks(chunks, provider, writer, batch_size=64)
 生产 API 入口是 `ApiMultimodalEmbedder`：文档发送文本，图片发送文本与图片，
 音频发送转写文本与原始音频，视频发送融合文本、原始视频和可访问的代表帧；
 私有 `minio://` 路径必须由应用层转换为短时 presigned HTTPS URL。Jina
-`v5-omni` 支持共享向量空间中的文本、图片、音频和视频输入。`scripts/index_chunks.py`
-支持已入库 Chunk 跳过、批量写入
+`v5-omni` 支持共享向量空间中的文本、图片、音频和视频输入；请求使用
+`normalized=true` 与 `embedding_type=float`。API transport 对网络错误、408、425、
+429 和 5xx 使用指数退避重试。`scripts/index_chunks.py` 支持已入库 Chunk 跳过、批量写入
 和结束后的一致性检查：
 
 ```bash
-python -m scripts.index_chunks --chunks chunks.jsonl
+python -m scripts.index_chunks \
+  --chunks chunks.jsonl \
+  --collection jina_v5_omni_small_1024 \
+  --rebuild
 ```
+
+`--rebuild` 只重建指定的 Jina 专用集合：先删除并新建 1024 维 COSINE 集合，
+再读取完整 JSONL、重新调用 Jina Embedding 并写入全部 Chunk，不会修改旧的通用集合。
 
 `evaluation/ingestion_samples.jsonl` 提供文档、表格、图片、音频、视频和纯画面
 场景的最小质量样例，测试会校验这些样例都能产出完整 Chunk 元数据。

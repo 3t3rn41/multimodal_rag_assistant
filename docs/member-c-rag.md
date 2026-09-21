@@ -65,7 +65,7 @@ from rag_engine.retrieval import BM25Retriever, HybridRetriever
 
 vector = QdrantVectorRetriever(
     QdrantClient(url="http://localhost:6333"),
-    collection_name="chunks",
+    collection_name="jina_v5_omni_small_1024",
     embed_query=embedding_service.embed_query,
     vector_name="dense",
 )

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from rag_engine.models import Chunk
+
+from .retry import RetryPolicy, retry_call
 
 
 class EmbeddingAPIError(RuntimeError):
@@ -31,6 +34,15 @@ class JsonTransport(Protocol):
 class HttpxJsonTransport:
     """Production JSON transport loaded lazily from the optional API extra."""
 
+    def __init__(
+        self,
+        *,
+        policy: RetryPolicy | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.policy = policy or RetryPolicy()
+        self.sleeper = sleeper
+
     def post_json(
         self,
         url: str,
@@ -46,7 +58,7 @@ class HttpxJsonTransport:
                 "API embeddings require the 'api' optional dependency"
             ) from exc
 
-        try:
+        def request() -> Any:
             response = httpx.post(
                 url,
                 headers=headers,
@@ -54,6 +66,15 @@ class HttpxJsonTransport:
                 timeout=timeout,
             )
             response.raise_for_status()
+            return response
+
+        try:
+            response = retry_call(
+                request,
+                policy=self.policy,
+                is_retryable=lambda exc: _is_retryable_httpx_error(httpx, exc),
+                sleeper=self.sleeper,
+            )
             data = response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise EmbeddingAPIError(f"embedding API request failed: {exc}") from exc
@@ -73,6 +94,8 @@ class MultimodalEmbeddingAPIConfig:
     timeout_seconds: float = 60.0
     passage_task: str = "retrieval.passage"
     query_task: str = "retrieval.query"
+    max_retries: int = 3
+    retry_backoff_seconds: float = 0.5
 
     def __post_init__(self) -> None:
         if not self.url.strip():
@@ -87,6 +110,7 @@ class MultimodalEmbeddingAPIConfig:
             raise ValueError("embedding timeout must be a finite positive number")
         if not self.passage_task.strip() or not self.query_task.strip():
             raise ValueError("embedding tasks must not be empty")
+        RetryPolicy(self.max_retries, self.retry_backoff_seconds)
 
     @classmethod
     def from_env(
@@ -128,6 +152,10 @@ class MultimodalEmbeddingAPIConfig:
                 "RAG_EMBEDDING_PASSAGE_TASK", "retrieval.passage"
             ),
             query_task=values.get("RAG_EMBEDDING_QUERY_TASK", "retrieval.query"),
+            max_retries=_int_env(values, "RAG_EMBEDDING_MAX_RETRIES", 3),
+            retry_backoff_seconds=_float_env(
+                values, "RAG_EMBEDDING_RETRY_BACKOFF_SECONDS", 0.5
+            ),
         )
 
 
@@ -148,7 +176,9 @@ class ApiMultimodalEmbedder:
         media_url_resolver: Callable[[str], str | None] | None = None,
     ) -> None:
         self.config = config
-        self.transport = transport or HttpxJsonTransport()
+        self.transport = transport or HttpxJsonTransport(
+            policy=RetryPolicy(config.max_retries, config.retry_backoff_seconds)
+        )
         self.media_url_resolver = media_url_resolver
 
     def embed(self, texts: Sequence[str]) -> list[tuple[float, ...]]:
@@ -228,7 +258,8 @@ class ApiMultimodalEmbedder:
             return []
         payload: dict[str, object] = {
             "model": self.config.model,
-            "encoding_format": "float",
+            "normalized": True,
+            "embedding_type": "float",
             "task": task,
             "input": list(inputs),
         }
@@ -294,6 +325,29 @@ def _mean_unit_vector(vectors: Sequence[Sequence[float]]) -> tuple[float, ...]:
 def _extra_string(chunk: Chunk, key: str) -> str | None:
     value = chunk.extra.get(key)
     return value if isinstance(value, str) else None
+
+
+def _is_retryable_httpx_error(httpx: Any, exc: Exception) -> bool:
+    if isinstance(exc, httpx.RequestError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status in {408, 425, 429} or status >= 500
+    return False
+
+
+def _int_env(values: Mapping[str, str], key: str, default: int) -> int:
+    try:
+        return int(values.get(key, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{key} must be an integer") from exc
+
+
+def _float_env(values: Mapping[str, str], key: str, default: float) -> float:
+    try:
+        return float(values.get(key, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{key} must be numeric") from exc
 
 
 def _unit_vector(vector: Sequence[float]) -> tuple[float, ...]:

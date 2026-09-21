@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import math
 import os
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import replace
 from typing import Any, Protocol
 
 from .models import RetrievalCandidate
+from ingestion.retry import RetryPolicy, retry_call
 
 
 class RerankAPIError(RuntimeError):
@@ -30,6 +32,15 @@ class RerankTransport(Protocol):
 class HttpxRerankTransport:
     """Lazy HTTP transport so offline retrieval tests need no HTTP package."""
 
+    def __init__(
+        self,
+        *,
+        policy: RetryPolicy | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.policy = policy or RetryPolicy()
+        self.sleeper = sleeper
+
     def post_json(
         self,
         url: str,
@@ -44,7 +55,7 @@ class HttpxRerankTransport:
             raise RuntimeError(
                 "Jina reranking requires the 'api' optional dependency"
             ) from exc
-        try:
+        def request() -> Any:
             response = httpx.post(
                 url,
                 headers=headers,
@@ -52,6 +63,15 @@ class HttpxRerankTransport:
                 timeout=timeout,
             )
             response.raise_for_status()
+            return response
+
+        try:
+            response = retry_call(
+                request,
+                policy=self.policy,
+                is_retryable=lambda exc: _is_retryable_httpx_error(httpx, exc),
+                sleeper=self.sleeper,
+            )
             data = response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise RerankAPIError(f"rerank API request failed: {exc}") from exc
@@ -68,6 +88,8 @@ class JinaRerankConfig:
     api_key: str = ""
     model: str = "jina-reranker-v3"
     timeout_seconds: float = 60.0
+    max_retries: int = 3
+    retry_backoff_seconds: float = 0.5
 
     def __post_init__(self) -> None:
         if not self.url.strip():
@@ -78,6 +100,7 @@ class JinaRerankConfig:
             raise ValueError("rerank model must not be empty")
         if self.timeout_seconds <= 0 or not math.isfinite(self.timeout_seconds):
             raise ValueError("rerank timeout must be a finite positive number")
+        RetryPolicy(self.max_retries, self.retry_backoff_seconds)
 
     @classmethod
     def from_env(
@@ -105,6 +128,10 @@ class JinaRerankConfig:
                 "jina-reranker-v3",
             ),
             timeout_seconds=timeout,
+            max_retries=int(values.get("RAG_RERANK_MAX_RETRIES", "3")),
+            retry_backoff_seconds=float(
+                values.get("RAG_RERANK_RETRY_BACKOFF_SECONDS", "0.5")
+            ),
         )
 
 
@@ -147,7 +174,9 @@ class JinaReranker:
         transport: RerankTransport | None = None,
     ) -> None:
         self.config = config
-        self.transport = transport or HttpxRerankTransport()
+        self.transport = transport or HttpxRerankTransport(
+            policy=RetryPolicy(config.max_retries, config.retry_backoff_seconds)
+        )
 
     def rerank(
         self,
@@ -192,6 +221,15 @@ class JinaReranker:
         if not candidate.chunk.content.strip():
             raise ValueError(f"chunk {candidate.chunk_id!r} has no rerank content")
         return candidate.chunk.content
+
+
+def _is_retryable_httpx_error(httpx: Any, exc: Exception) -> bool:
+    if isinstance(exc, httpx.RequestError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status in {408, 425, 429} or status >= 500
+    return False
 
 
 def _parse_rerank_results(
