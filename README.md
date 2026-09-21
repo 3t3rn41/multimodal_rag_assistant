@@ -173,7 +173,7 @@ SiliconFlow `Qwen/Qwen3-VL-Embedding-8B`。复制
 
 - `chunk_document`：保留页码、标题层级，并按重叠窗口切分文档块；
 - `image_chunk`：将图片描述和原图路径封装为可检索 Chunk；
-- `chunk_media`：按时间窗融合 ASR 文本和视频帧描述，保留可回溯时间段；
+- `chunk_media`：按时间窗融合 ASR 文本和视频帧描述；转写只归属一个窗口，引用时间使用实际证据边界；
 - `ApiMultimodalEmbedder`：通过外部图文 Embedding API 统一处理文本、图片和视频代表帧；
 - `index_chunks`：批量校验向量、支持断点续传，并通过 `QdrantVectorWriter` 写入向量库。
 

@@ -87,9 +87,12 @@ def chunk_media(
 ) -> list[Chunk]:
     """Fuse ASR and frame descriptions into fixed, time-addressable windows.
 
-    A record belongs to a window when its interval intersects that window. A
-    frame belongs to the window containing its timestamp. Empty windows are
-    omitted, which keeps the vector index free of silent or blank media spans.
+    Each transcript segment is assigned exactly once, using its start timestamp
+    as the owning window. This avoids duplicating a long ASR segment that crosses
+    a boundary. Chunk time metadata records the actual evidence bounds while
+    ``extra.window_start``/``window_end`` retain the fixed retrieval bucket.
+    Empty windows are omitted, which keeps the vector index free of silent or
+    blank media spans.
     """
 
     _validate_file_id(file_id)
@@ -103,10 +106,10 @@ def chunk_media(
         default=0.0,
     )
     max_end = max(max_end, max((frame.timestamp for frame in frames), default=0.0))
-    if max_end <= 0:
+    if not transcripts and not frames:
         return []
 
-    window_count = math.ceil(max_end / window_seconds)
+    window_count = max(1, math.ceil(max_end / window_seconds))
     chunks: list[Chunk] = []
     for window_index in range(window_count):
         start = window_index * window_seconds
@@ -114,7 +117,7 @@ def chunk_media(
         matching_transcripts = [
             segment
             for segment in transcripts
-            if segment.start < end and segment.end > start
+            if math.floor(segment.start / window_seconds) == window_index
         ]
         matching_frames = [
             frame
@@ -134,10 +137,16 @@ def chunk_media(
             content_parts.append(f"画面描述：{'；'.join(frame_descriptions)}")
 
         frame_paths = [frame.media_path for frame in matching_frames]
+        evidence_starts = [segment.start for segment in matching_transcripts]
+        evidence_starts.extend(frame.timestamp for frame in matching_frames)
+        evidence_ends = [segment.end for segment in matching_transcripts]
+        evidence_ends.extend(frame.timestamp for frame in matching_frames)
         extra = {
             "speech_text": speech_text,
             "frame_descriptions": frame_descriptions,
             "frame_paths": frame_paths,
+            "window_start": start,
+            "window_end": end,
             "window_seconds": window_seconds,
         }
         chunks.append(
@@ -146,8 +155,8 @@ def chunk_media(
                 file_id=file_id,
                 source_type=source_type,
                 content="\n".join(content_parts),
-                time_start=start,
-                time_end=end,
+                time_start=min(evidence_starts),
+                time_end=max(evidence_ends),
                 media_path=frame_paths[0] if frame_paths else None,
                 extra=extra,
             )

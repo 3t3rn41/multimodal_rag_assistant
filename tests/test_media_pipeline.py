@@ -93,7 +93,7 @@ class MediaPipelineTests(unittest.TestCase):
         self.assertEqual(chunks[0].source_type, "video")
         self.assertIn("打开配置文件", chunks[0].content)
         self.assertIn("frame_000001", chunks[0].content)
-        self.assertEqual(chunks[1].time_start, 30)
+        self.assertEqual(chunks[1].time_start, 31)
 
     def test_audio_pipeline_preserves_transcript_timestamps(self) -> None:
         chunks = ingest_audio(
@@ -104,7 +104,8 @@ class MediaPipelineTests(unittest.TestCase):
         )
 
         self.assertEqual([chunk.source_type for chunk in chunks], ["audio", "audio"])
-        self.assertEqual(chunks[0].time_start, 0)
+        self.assertEqual(chunks[0].time_start, 2)
+        self.assertEqual(chunks[0].time_end, 9)
         self.assertIn("打开配置文件", chunks[0].content)
 
     def test_transcription_and_caption_clients_use_configured_apis(self) -> None:

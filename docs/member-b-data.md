@@ -12,7 +12,7 @@
 
 - 文档：`source_type="document"`，使用 `page` 和 `extra["heading"]`；
 - 图片：`source_type="image"`，描述写入 `content`，原图写入 `media_path`；
-- 音频/视频：使用 `time_start`、`time_end`，语音和画面描述合并到 `content`；
+- 音频/视频：使用实际证据边界的 `time_start`、`time_end`，语音和画面描述合并到 `content`；固定检索桶保存在 `extra.window_start`/`window_end`；
 - 向量：写入 `Chunk.embedding`，传给 Qdrant 时作为 point vector，其他元数据由
   `Chunk.to_payload()` 提供。
 

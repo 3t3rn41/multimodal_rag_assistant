@@ -73,12 +73,13 @@ class DocumentChunkingTests(unittest.TestCase):
         )
 
         self.assertEqual(len(chunks), 2)
-        self.assertEqual(chunks[0].time_start, 0)
-        self.assertEqual(chunks[0].time_end, 30)
+        self.assertEqual(chunks[0].time_start, 2)
+        self.assertEqual(chunks[0].time_end, 9)
         self.assertIn("先打开配置文件", chunks[0].content)
         self.assertIn("终端显示配置文件", chunks[0].content)
         self.assertEqual(chunks[0].extra["frame_paths"], ["frames/5.jpg"])
-        self.assertEqual(chunks[1].time_start, 30)
+        self.assertEqual(chunks[1].time_start, 31)
+        self.assertEqual(chunks[1].time_end, 37)
         self.assertEqual(chunks[1].media_path, "frames/34.jpg")
 
     def test_cross_window_transcript_is_not_duplicated_and_citation_is_precise(self) -> None:

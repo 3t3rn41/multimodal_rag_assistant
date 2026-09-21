@@ -110,6 +110,9 @@ class ApiMultimodalEmbedderTests(unittest.TestCase):
         self.assertEqual(payload["model"], "multimodal-model")
         self.assertEqual(payload["dimensions"], 2)
         self.assertEqual(payload["encoding_format"], "float")
+        self.assertNotIn("task", payload)
+        self.assertNotIn("normalized", payload)
+        self.assertNotIn("embedding_type", payload)
         self.assertEqual(
             payload["input"],
             [
