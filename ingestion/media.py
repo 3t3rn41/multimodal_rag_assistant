@@ -6,7 +6,8 @@ import base64
 import mimetypes
 import os
 import subprocess
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -15,6 +16,7 @@ from rag_engine.models import Chunk
 
 from .api_embeddings import HttpxJsonTransport, JsonTransport
 from .chunking import chunk_media
+from .retry import RetryPolicy, retry_call
 from .types import FrameDescription, TranscriptSegment
 
 
@@ -176,6 +178,13 @@ class MediaAPIConfig:
     vision_api_key: str
     vision_model: str
     timeout_seconds: float = 60.0
+    max_retries: int = 3
+    retry_backoff_seconds: float = 0.5
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds <= 0:
+            raise ValueError("media API timeout must be positive")
+        RetryPolicy(self.max_retries, self.retry_backoff_seconds)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "MediaAPIConfig":
@@ -201,6 +210,10 @@ class MediaAPIConfig:
             vision_api_key=required["RAG_VISION_API_KEY"],
             vision_model=values.get("RAG_VISION_MODEL", "gpt-4o-mini"),
             timeout_seconds=float(values.get("RAG_MEDIA_API_TIMEOUT_SECONDS", "60")),
+            max_retries=int(values.get("RAG_MEDIA_MAX_RETRIES", "3")),
+            retry_backoff_seconds=float(
+                values.get("RAG_MEDIA_RETRY_BACKOFF_SECONDS", "0.5")
+            ),
         )
 
 
@@ -217,6 +230,15 @@ class MultipartTransport(Protocol):
 
 
 class HttpxMultipartTransport:
+    def __init__(
+        self,
+        *,
+        policy: RetryPolicy | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.policy = policy or RetryPolicy()
+        self.sleeper = sleeper
+
     def post_file(
         self,
         url: str,
@@ -231,7 +253,10 @@ class HttpxMultipartTransport:
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise RuntimeError("media API clients require the 'api' extra") from exc
         mime = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-        try:
+
+        def request() -> Any:
+            # Reopen the file for each attempt so httpx never retries with an
+            # exhausted multipart stream.
             with file_path.open("rb") as file_handle:
                 response = httpx.post(
                     url,
@@ -241,6 +266,15 @@ class HttpxMultipartTransport:
                     timeout=timeout,
                 )
             response.raise_for_status()
+            return response
+
+        try:
+            response = retry_call(
+                request,
+                policy=self.policy,
+                is_retryable=lambda exc: _is_retryable_media_http_error(httpx, exc),
+                sleeper=self.sleeper,
+            )
             response_data = response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise RuntimeError(f"transcription API request failed: {exc}") from exc
@@ -257,7 +291,9 @@ class ApiTranscriber:
         transport: MultipartTransport | None = None,
     ) -> None:
         self.config = config
-        self.transport = transport or HttpxMultipartTransport()
+        self.transport = transport or HttpxMultipartTransport(
+            policy=RetryPolicy(config.max_retries, config.retry_backoff_seconds)
+        )
 
     def transcribe(self, audio_path: Path) -> list[TranscriptSegment]:
         response = self.transport.post_file(
@@ -293,7 +329,9 @@ class ApiImageCaptioner:
         prompt: str = "Describe the image for multimodal retrieval, including visible text and chart values.",
     ) -> None:
         self.config = config
-        self.transport = transport or HttpxJsonTransport()
+        self.transport = transport or HttpxJsonTransport(
+            policy=RetryPolicy(config.max_retries, config.retry_backoff_seconds)
+        )
         self.prompt = prompt
 
     def caption(self, image: str | Path) -> str:
@@ -334,10 +372,13 @@ class VideoIngestionPipeline:
         extractor: MediaExtractor,
         transcriber: Transcriber,
         captioner: ImageCaptioner,
+        *,
+        media_ref_resolver: Callable[[Path], str] | None = None,
     ) -> None:
         self.extractor = extractor
         self.transcriber = transcriber
         self.captioner = captioner
+        self.media_ref_resolver = media_ref_resolver
 
     def ingest(
         self,
@@ -370,7 +411,13 @@ class VideoIngestionPipeline:
             source_type="video",
             window_seconds=window_seconds,
         )
-        return _clip_chunks(chunks, video_path, work_dir, self.extractor)
+        return clip_chunk_media(
+            chunks,
+            video_path,
+            work_dir,
+            self.extractor,
+            media_ref_resolver=self.media_ref_resolver,
+        )
 
 
 def ingest_audio(
@@ -381,6 +428,7 @@ def ingest_audio(
     window_seconds: float = 30.0,
     media_clipper: MediaClipper | None = None,
     work_dir: Path | None = None,
+    media_ref_resolver: Callable[[Path], str] | None = None,
 ):
     """Transcribe audio and reuse the same timestamped media fusion contract."""
 
@@ -392,20 +440,30 @@ def ingest_audio(
         window_seconds=window_seconds,
     )
     clipper = media_clipper or FFmpegMediaExtractor()
-    return _clip_chunks(
+    return clip_chunk_media(
         chunks,
         audio_path,
         work_dir or audio_path.parent,
         clipper,
+        media_ref_resolver=media_ref_resolver,
     )
 
 
-def _clip_chunks(
+def clip_chunk_media(
     chunks: list[Chunk],
     source_path: Path,
     output_dir: Path,
     clipper: MediaClipper,
+    *,
+    media_ref_resolver: Callable[[Path], str] | None = None,
 ) -> list[Chunk]:
+    """Create per-chunk clips and optionally persist uploadable references.
+
+    The clipper writes local files. An application that uploads those files to
+    object storage should provide ``media_ref_resolver``; its returned
+    ``minio://``, HTTP(S), or data URL is what the embedding layer persists.
+    """
+
     clipped: list[Chunk] = []
     for chunk in chunks:
         start_seconds, end_seconds = _clip_bounds(chunk)
@@ -415,12 +473,44 @@ def _clip_chunks(
             start_seconds=start_seconds,
             end_seconds=end_seconds,
         )
+        media_reference = str(clip_path)
+        if media_ref_resolver is not None:
+            media_reference = media_ref_resolver(clip_path)
+            if not is_media_reference(media_reference):
+                raise ValueError(
+                    "media_ref_resolver must return a minio://, HTTP(S), or data reference"
+                )
         extra = dict(chunk.extra)
-        extra["source_media_path"] = str(clip_path)
+        extra["source_media_path"] = media_reference
         extra["original_media_path"] = str(source_path)
-        media_path = str(clip_path) if chunk.source_type == "audio" else chunk.media_path
+        if media_ref_resolver is not None and chunk.source_type == "video":
+            frame_paths = extra.get("frame_paths", [])
+            if isinstance(frame_paths, list):
+                extra["frame_paths"] = [
+                    _resolve_media_path(path, media_ref_resolver)
+                    for path in frame_paths
+                ]
+        media_path = (
+            media_reference
+            if chunk.source_type == "audio"
+            else _resolve_media_path(chunk.media_path, media_ref_resolver)
+        )
         clipped.append(replace(chunk, media_path=media_path, extra=extra))
     return clipped
+
+
+def _resolve_media_path(
+    value: str | None,
+    resolver: Callable[[Path], str] | None,
+) -> str | None:
+    if value is None or resolver is None:
+        return value
+    reference = resolver(Path(value))
+    if not is_media_reference(reference):
+        raise ValueError(
+            "media_ref_resolver must return a minio://, HTTP(S), or data reference"
+        )
+    return reference
 
 
 def _clip_bounds(chunk: Chunk) -> tuple[float, float]:
@@ -443,3 +533,20 @@ def _image_reference(image: str | Path) -> str:
     mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime};base64,{encoded}"
+
+
+def is_media_reference(value: str | None) -> bool:
+    """Return whether a value can be resolved by a multimodal API boundary."""
+
+    return bool(
+        value
+        and value.startswith(("https://", "http://", "data:", "minio://"))
+    )
+
+
+def _is_retryable_media_http_error(httpx: Any, exc: Exception) -> bool:
+    if isinstance(exc, httpx.RequestError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in {408, 425, 429} or exc.response.status_code >= 500
+    return False

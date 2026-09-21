@@ -15,7 +15,9 @@ from .media import (
     MediaClipper,
     MediaAPIConfig,
     VideoIngestionPipeline,
+    clip_chunk_media,
     ingest_audio,
+    is_media_reference,
 )
 from .embedding import (
     ChunkEmbeddingProvider,
@@ -47,6 +49,8 @@ __all__ = [
     "MultimodalEmbeddingAPIConfig",
     "MediaAPIConfig",
     "MediaClipper",
+    "clip_chunk_media",
+    "is_media_reference",
     "ParsedDocument",
     "PyMuPDFParser",
     "QdrantVectorWriter",

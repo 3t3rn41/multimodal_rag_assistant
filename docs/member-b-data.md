@@ -48,8 +48,12 @@ chunks = chunk_media(
 `PyMuPDFParser`、`DocxParser`、`FFmpegMediaExtractor`、`ApiTranscriber` 和
 `ApiImageCaptioner` 已提供适配边界；PDF 解析依赖可选的 PyMuPDF，音视频依赖系统
 FFmpeg，转写和图片描述依赖你填写的 API。媒体流水线会按每个 Chunk 的实际
-`time_start/time_end` 生成裁剪文件，并把裁剪路径写入
-`extra["source_media_path"]`；只有单帧证据没有正时长时才回退到所属检索窗口。
+`time_start/time_end` 生成裁剪文件；生产调用应给 `VideoIngestionPipeline` 或
+`ingest_audio` 传入 `media_ref_resolver`，在上传 MinIO 后返回
+`minio://...`（或 presigned HTTP(S) URL），再写入 `extra["source_media_path"]`。
+没有 resolver 时仍可生成本地裁剪文件用于开发测试，但不能交给生产 Embedding。
+只有单帧证据没有正时长时才回退到所属检索窗口。FFmpeg 当前使用 `-c copy`，切点
+可能受视频关键帧影响；需要逐帧精确播放时再切换为重编码，属于 MVP 之后的增强。
 这样切片/对齐测试不需要下载模型，也不会把真实 Token 写入仓库。
 
 ## 向量化入库
@@ -84,7 +88,9 @@ report = index_chunks(chunks, provider, writer, batch_size=64)
 私有 `minio://` 路径必须由应用层转换为短时 presigned HTTPS URL。Jina
 `v5-omni` 支持共享向量空间中的文本、图片、音频和视频输入；请求使用
 `normalized=true` 与 `embedding_type=float`。API transport 对网络错误、408、425、
-429 和 5xx 使用指数退避重试。`scripts/index_chunks.py` 支持已入库 Chunk 跳过、批量写入
+429 和 5xx 使用指数退避重试；Qdrant upsert/retrieve 与转写 multipart 上传也使用
+同一套有限重试。已有 Qdrant 集合会先校验 1024 维、`dense` named vector 和 COSINE
+距离，不匹配时立即报错。`scripts/index_chunks.py` 支持已入库 Chunk 跳过、批量写入
 和结束后的一致性检查：
 
 ```bash
@@ -104,13 +110,31 @@ python -m scripts.index_chunks \
 `evaluation/ingestion_samples.jsonl` 提供文档、表格、图片、音频、视频和纯画面
 场景的最小质量样例，测试会校验这些样例都能产出完整 Chunk 元数据。
 
-如果上游暂时只有这种“解析记录 JSONL”，可以先导出标准 Chunk 文件：
+如果上游暂时只有这种“解析记录 JSONL”，可以先导出标准 Chunk 文件。远程媒体引用
+会原样保留；本地媒体必须显式裁剪并指定远程引用规则，否则脚本会拒绝生成可索引的
+JSONL：
 
 ```bash
 python -m scripts.build_ingestion_chunks \
   --input evaluation/ingestion_samples.jsonl \
   --output chunks.jsonl
 ```
+
+本地音视频的 MVP 裁剪示例：
+
+```bash
+python -m scripts.build_ingestion_chunks \
+  --input parsed_records.jsonl \
+  --output chunks.jsonl \
+  --clip-media \
+  --media-work-dir ./media_clips \
+  --media-minio-prefix extracted-chunks
+```
+
+这个命令会按 Chunk 时间范围生成裁剪文件，并把对应的
+`minio://extracted-chunks/...` 写入 JSONL；它不负责上传文件。上传服务必须使用同样的
+对象名，索引前设置 `RAG_MEDIA_PUBLIC_BASE_URL`，让 Jina 收到 HTTP(S) 或 data URL。
+`index_chunks.py` 会在调用 Jina 前检查这些引用，避免媒体静默退化为纯文本向量。
 
 真实数据请把 `--input` 换成上游解析结果；不要把原始 PDF/视频文件直接传给
 `index_chunks.py`。只有评估样例中的占位媒体 URL 不可访问时，才可临时加

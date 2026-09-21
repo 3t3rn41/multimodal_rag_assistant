@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 from uuid import UUID
 
 from rag_engine.models import Chunk
+
+from .retry import RetryPolicy, retry_call
 
 
 class EmbeddingProvider(Protocol):
@@ -144,11 +147,15 @@ class QdrantVectorWriter:
         *,
         vector_name: str | None = None,
         wait: bool = True,
+        retry_policy: RetryPolicy | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self.client = client
         self.collection_name = collection_name
         self.vector_name = vector_name
         self.wait = wait
+        self.retry_policy = retry_policy or RetryPolicy()
+        self.sleeper = sleeper
 
     def upsert(self, chunks: Sequence[Chunk]) -> int:
         try:
@@ -172,10 +179,15 @@ class QdrantVectorWriter:
                     payload=chunk.to_payload(),
                 )
             )
-        self.client.upsert(
-            collection_name=self.collection_name,
-            points=points,
-            wait=self.wait,
+        retry_call(
+            lambda: self.client.upsert(
+                collection_name=self.collection_name,
+                points=points,
+                wait=self.wait,
+            ),
+            policy=self.retry_policy,
+            is_retryable=_is_retryable_qdrant_error,
+            sleeper=self.sleeper,
         )
         return len(points)
 
@@ -184,11 +196,16 @@ class QdrantVectorWriter:
 
         if not chunks:
             return set()
-        points = self.client.retrieve(
-            collection_name=self.collection_name,
-            ids=[_qdrant_point_id(chunk) for chunk in chunks],
-            with_payload=True,
-            with_vectors=False,
+        points = retry_call(
+            lambda: self.client.retrieve(
+                collection_name=self.collection_name,
+                ids=[_qdrant_point_id(chunk) for chunk in chunks],
+                with_payload=True,
+                with_vectors=False,
+            ),
+            policy=self.retry_policy,
+            is_retryable=_is_retryable_qdrant_error,
+            sleeper=self.sleeper,
         )
         existing: set[str] = set()
         for point in points:
@@ -231,6 +248,12 @@ def ensure_qdrant_collection(
         client.delete_collection(collection_name=collection_name)
         exists = False
     if exists:
+        _validate_existing_qdrant_schema(
+            client,
+            collection_name,
+            dimensions,
+            vector_name=vector_name,
+        )
         return
 
     vector_params = models.VectorParams(
@@ -277,3 +300,60 @@ def _qdrant_point_id(chunk: Chunk) -> str:
             f"chunk {chunk.chunk_id!r} requires a persisted UUID in "
             "extra['qdrant_point_id'] or UUID chunk_id"
         ) from exc
+
+
+def _validate_existing_qdrant_schema(
+    client: Any,
+    collection_name: str,
+    dimensions: int,
+    *,
+    vector_name: str | None,
+) -> None:
+    info = client.get_collection(collection_name=collection_name)
+    try:
+        vectors = info.config.params.vectors
+    except AttributeError as exc:
+        raise ValueError(
+            f"Qdrant collection {collection_name!r} has no readable vector schema"
+        ) from exc
+
+    if vector_name:
+        if not isinstance(vectors, Mapping) or vector_name not in vectors:
+            raise ValueError(
+                f"Qdrant collection {collection_name!r} has no named vector "
+                f"{vector_name!r}"
+            )
+        vector_params = vectors[vector_name]
+    else:
+        if isinstance(vectors, Mapping):
+            raise ValueError(
+                f"Qdrant collection {collection_name!r} uses named vectors; "
+                "configure vector_name"
+            )
+        vector_params = vectors
+
+    actual_dimensions = getattr(vector_params, "size", None)
+    if actual_dimensions != dimensions:
+        raise ValueError(
+            f"Qdrant collection {collection_name!r} dimensions mismatch: "
+            f"expected {dimensions}, found {actual_dimensions}"
+        )
+    actual_distance = getattr(vector_params, "distance", None)
+    actual_distance = getattr(actual_distance, "value", actual_distance)
+    if str(actual_distance).casefold() != "cosine":
+        raise ValueError(
+            f"Qdrant collection {collection_name!r} distance mismatch: "
+            f"expected cosine, found {actual_distance}"
+        )
+
+
+def _is_retryable_qdrant_error(exc: Exception) -> bool:
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return True
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+    return isinstance(status_code, int) and (
+        status_code in {408, 425, 429} or status_code >= 500
+    )

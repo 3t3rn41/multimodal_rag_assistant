@@ -11,6 +11,7 @@ from typing import Any
 
 from ingestion import DocumentBlock, FrameDescription, TranscriptSegment
 from ingestion import chunk_document, chunk_media, image_chunk
+from ingestion.media import FFmpegMediaExtractor, clip_chunk_media, is_media_reference
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,6 +27,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--text-only",
         action="store_true",
         help="drop media references; useful only for placeholder evaluation URLs",
+    )
+    parser.add_argument(
+        "--clip-media",
+        action="store_true",
+        help="crop local audio/video sources to each chunk's evidence interval",
+    )
+    parser.add_argument(
+        "--media-work-dir",
+        type=Path,
+        help="directory for local media clips; defaults to <output>/media_clips",
+    )
+    parser.add_argument(
+        "--media-url-base",
+        help="HTTP(S) base URL for uploaded clips, e.g. https://cdn.example/chunks",
+    )
+    parser.add_argument(
+        "--media-minio-prefix",
+        help="MinIO object prefix for uploaded clips, e.g. extracted-chunks",
     )
     return parser
 
@@ -46,7 +65,14 @@ def read_records(path: Path) -> list[Mapping[str, Any]]:
     return records
 
 
-def build_chunks(records: Iterable[Mapping[str, Any]]) -> list[Any]:
+def build_chunks(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    clip_media: bool = False,
+    media_work_dir: Path | None = None,
+    media_clipper: Any | None = None,
+    media_ref_resolver: Any | None = None,
+) -> list[Any]:
     chunks: list[Any] = []
     for row in records:
         source_type = str(row.get("source_type", ""))
@@ -79,21 +105,45 @@ def build_chunks(records: Iterable[Mapping[str, Any]]) -> list[Any]:
                 for frame in data.get("frames", [])
             ]
             source_media_path = data.get("source_media_path")
-            chunks.extend(
-                chunk_media(
-                    file_id,
-                    transcripts,
-                    frames,
-                    source_type=source_type,
-                    source_media_path=(
-                        str(source_media_path)
-                        if source_media_path is not None
-                        else None
-                    ),
-                )
+            source_media_path = (
+                str(source_media_path) if source_media_path is not None else None
             )
+            if clip_media:
+                if not source_media_path or is_media_reference(source_media_path):
+                    raise ValueError(
+                        "--clip-media requires a local source_media_path; "
+                        "remote media must be cropped upstream"
+                    )
+                if media_work_dir is None or media_ref_resolver is None:
+                    raise ValueError(
+                        "--clip-media requires --media-work-dir and a remote "
+                        "reference option"
+                    )
+            elif source_media_path and not is_media_reference(source_media_path):
+                raise ValueError(
+                    "local media path cannot enter the Chunk JSONL; provide a "
+                    "remote media reference or use --clip-media"
+                )
+
+            media_chunks = chunk_media(
+                file_id,
+                transcripts,
+                frames,
+                source_type=source_type,
+                source_media_path=source_media_path,
+            )
+            if clip_media:
+                media_chunks = clip_chunk_media(
+                    media_chunks,
+                    Path(source_media_path),
+                    media_work_dir,
+                    media_clipper or FFmpegMediaExtractor(),
+                    media_ref_resolver=media_ref_resolver,
+                )
+            chunks.extend(media_chunks)
         else:
             raise ValueError(f"unsupported source_type: {source_type!r}")
+    _validate_media_references(chunks)
     return chunks
 
 
@@ -123,9 +173,56 @@ def write_chunks(path: Path, chunks: Iterable[Any]) -> int:
     return count
 
 
+def _validate_media_references(chunks: Iterable[Any]) -> None:
+    for chunk in chunks:
+        values: list[str | None] = []
+        if chunk.source_type == "image":
+            values.append(chunk.media_path)
+        elif chunk.source_type in {"audio", "video"}:
+            values.append(chunk.extra.get("source_media_path"))
+            if chunk.source_type == "video":
+                values.append(chunk.media_path)
+        for value in values:
+            if value and not is_media_reference(str(value)):
+                raise ValueError(
+                    "Chunk JSONL contains a local media path; use minio://, "
+                    "HTTP(S), or data references before indexing"
+                )
+
+
+def _media_ref_resolver(
+    *,
+    media_url_base: str | None,
+    media_minio_prefix: str | None,
+) -> Any | None:
+    if media_url_base and media_minio_prefix:
+        raise ValueError("choose only one of --media-url-base and --media-minio-prefix")
+    if media_url_base:
+        base = media_url_base.rstrip("/")
+        return lambda path: f"{base}/{path.name}"
+    if media_minio_prefix:
+        prefix = media_minio_prefix.removeprefix("minio://").strip("/")
+        if not prefix:
+            raise ValueError("--media-minio-prefix must not be empty")
+        return lambda path: f"minio://{prefix}/{path.name}"
+    return None
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    chunks = build_chunks(read_records(args.input))
+    resolver = _media_ref_resolver(
+        media_url_base=args.media_url_base,
+        media_minio_prefix=args.media_minio_prefix,
+    )
+    work_dir = args.media_work_dir
+    if args.clip_media and work_dir is None:
+        work_dir = args.output.parent / "media_clips"
+    chunks = build_chunks(
+        read_records(args.input),
+        clip_media=args.clip_media,
+        media_work_dir=work_dir,
+        media_ref_resolver=resolver,
+    )
     if args.text_only:
         chunks = _without_media(chunks)
     count = write_chunks(args.output, chunks)

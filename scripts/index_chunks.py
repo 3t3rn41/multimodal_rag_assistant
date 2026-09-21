@@ -6,7 +6,7 @@ import argparse
 from dataclasses import asdict
 import json
 import os
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from ingestion import (
@@ -16,6 +16,7 @@ from ingestion import (
     ensure_qdrant_collection,
     index_chunks,
 )
+from ingestion.media import is_media_reference
 from rag_engine.models import Chunk
 
 
@@ -37,7 +38,40 @@ def _media_url_resolver(value: str) -> str | None:
     base_url = os.getenv("RAG_MEDIA_PUBLIC_BASE_URL", "").rstrip("/")
     if value.startswith("minio://") and base_url:
         return f"{base_url}/{value.removeprefix('minio://')}"
-    return value
+    if value.startswith(("https://", "http://", "data:")):
+        return value
+    return None
+
+
+def validate_media_references(
+    chunks: Iterable[Chunk],
+    resolver: Callable[[str], str | None],
+) -> None:
+    """Reject media that the embedding endpoint would silently ignore."""
+
+    for chunk in chunks:
+        values: list[str | None] = []
+        if chunk.source_type == "image":
+            values.append(chunk.media_path)
+        elif chunk.source_type in {"audio", "video"}:
+            values.append(chunk.extra.get("source_media_path"))
+            if chunk.source_type == "video":
+                values.append(chunk.media_path)
+        for value in values:
+            if not value:
+                continue
+            raw_value = str(value)
+            if not is_media_reference(raw_value):
+                raise ValueError(
+                    f"chunk {chunk.chunk_id!r} has a local media path; "
+                    "create a remote media reference and persist minio:// or HTTP(S) first"
+                )
+            resolved = resolver(raw_value)
+            if not resolved or not resolved.startswith(("https://", "http://", "data:")):
+                raise ValueError(
+                    f"chunk {chunk.chunk_id!r} media reference {raw_value!r} "
+                    "does not resolve to an HTTP(S) or data URL"
+                )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,6 +113,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise SystemExit("install the 'qdrant' optional dependency first") from exc
 
     chunks = read_chunks(args.chunks)
+    validate_media_references(chunks, _media_url_resolver)
     embedding_config = MultimodalEmbeddingAPIConfig.from_env()
     dimensions = embedding_config.dimensions or args.embedding_dimensions
     if dimensions <= 0:
