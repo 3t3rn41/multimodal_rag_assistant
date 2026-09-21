@@ -96,6 +96,22 @@ python -m scripts.index_chunks \
 
 `--rebuild` 只重建指定的 Jina 专用集合：先删除并新建 1024 维 COSINE 集合，
 再读取完整 JSONL、重新调用 Jina Embedding 并写入全部 Chunk，不会修改旧的通用集合。
+本地 Qdrant 使用 `http://localhost:6333`；Qdrant Cloud 则将集群 URL 填入
+`RAG_QDRANT_URL`，并将访问令牌填入 `RAG_QDRANT_API_KEY`。
+如果不想启动 Qdrant 服务，可以使用客户端的本地持久化模式：传
+`--qdrant-path ./qdrant_storage`；该模式会把集合数据保存在指定目录。
 
 `evaluation/ingestion_samples.jsonl` 提供文档、表格、图片、音频、视频和纯画面
 场景的最小质量样例，测试会校验这些样例都能产出完整 Chunk 元数据。
+
+如果上游暂时只有这种“解析记录 JSONL”，可以先导出标准 Chunk 文件：
+
+```bash
+python -m scripts.build_ingestion_chunks \
+  --input evaluation/ingestion_samples.jsonl \
+  --output chunks.jsonl
+```
+
+真实数据请把 `--input` 换成上游解析结果；不要把原始 PDF/视频文件直接传给
+`index_chunks.py`。只有评估样例中的占位媒体 URL 不可访问时，才可临时加
+`--text-only` 做文本索引验证。

@@ -44,6 +44,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chunks", type=Path, required=True)
     parser.add_argument("--qdrant-url", default=os.getenv("RAG_QDRANT_URL", "http://localhost:6333"))
+    parser.add_argument("--qdrant-api-key", default=os.getenv("RAG_QDRANT_API_KEY", ""))
+    parser.add_argument(
+        "--qdrant-path",
+        type=Path,
+        default=(Path(os.environ["RAG_QDRANT_PATH"])
+                 if os.getenv("RAG_QDRANT_PATH") else None),
+        help="use Qdrant's local persistent mode instead of an HTTP server",
+    )
     parser.add_argument(
         "--collection",
         default=os.getenv("RAG_QDRANT_COLLECTION", "jina_v5_omni_small_1024"),
@@ -79,7 +87,14 @@ def main(argv: Iterable[str] | None = None) -> int:
         embedding_config,
         media_url_resolver=_media_url_resolver,
     )
-    client = QdrantClient(url=args.qdrant_url)
+    if args.qdrant_path is not None:
+        args.qdrant_path.parent.mkdir(parents=True, exist_ok=True)
+        client = QdrantClient(path=str(args.qdrant_path))
+    else:
+        client = QdrantClient(
+            url=args.qdrant_url,
+            api_key=args.qdrant_api_key or None,
+        )
     ensure_qdrant_collection(
         client,
         args.collection,
