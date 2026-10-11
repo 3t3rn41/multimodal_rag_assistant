@@ -1,0 +1,31 @@
+{
+  "name": "multimodal-rag-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "preview": "vite preview",
+    "test": "vitest run --config vitest.config.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dompurify": "^3.2.4",
+    "lucide-vue-next": "^0.577.0",
+    "marked": "^15.0.6",
+    "pinia": "^3.0.1",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "jsdom": "^29.1.1",
+    "typescript": "~5.9.3",
+    "vite": "^7.0.0",
+    "vitest": "^3.0.0",
+    "vue-tsc": "^3.3.12"
+  }
+}
