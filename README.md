@@ -1,48 +1,48 @@
 # 基于多模态 RAG 的智能问答助手
 
-一个面向文档、图片、音频和视频资料的多模态检索增强生成（RAG）系统方案。项目目标是将非结构化资料统一解析为带有来源、页码或时间轴信息的 Chunk，通过混合检索与重排序召回可靠上下文，再由大模型生成可追溯的流式回答。
+一个面向文档、图片、音频和视频资料的多模态检索增强生成（RAG）系统。项目目标是将非结构化资料统一解析为带有来源、页码或时间轴信息的 Chunk，通过混合检索与重排序召回可靠上下文，再由大模型生成可追溯的流式回答。
 
-> 当前状态：项目处于方案落地阶段。成员 B 已完成统一 Chunk 数据契约、文档/图片/音视频切片对齐和批量向量入库边界；成员 C 的检索、重排、流式生成、结构化引用和评估基线已实现，后端 API、前端和部署模块将按里程碑继续接入。
+> 当前状态：成员 A 已实现 Vue 3 前端、FastAPI 后端、Celery 文档任务及开发/部署入口，并接入 B 的数据处理和 C 的 RAG 模块。网页链路当前支持 PDF、DOCX、TXT、MD 的上传、异步入库、流式问答与引用查看；图片和音视频能力已有数据/算法边界，网页接入与全链路运行验收仍待完成。
 
 ## 项目目标
 
-系统将围绕以下链路构建：
+系统围绕以下链路构建，当前网页已接通文档流程：
 
 ```text
 文件上传 → 解析/抽取 → 清洗与切片 → 多模态向量化 → 向量库入库
     → 混合检索 → Rerank 重排 → 大模型生成 → 流式回答与引用溯源
 ```
 
-核心体验包括：
+当前已实现：
 
-- 支持 PDF、Word、图片、音频和视频等资料；
-- 支持大文件分片上传、异步解析和任务进度展示；
-- 支持文本、图片描述、音频转写和视频时间轴切片的统一检索；
-- 支持向量检索与 BM25 关键词检索融合，并通过 Rerank 提升相关性；
-- 支持 SSE 流式回答、Markdown 渲染和多模态引用展示；
-- 引用可回溯到文档页码、图片或视频的具体时间区间，检索无依据时明确拒答。
+- 邮箱验证码注册、登录和密码重置，以及用户数据隔离；
+- 知识库管理，PDF、DOCX、TXT、MD 上传和 arXiv/PDF 链接导入；
+- Celery 异步解析、切片和向量入库，任务进度轮询与失败后重新解析；
+- 向量检索与 BM25 加权 RRF 融合，并通过 Jina Rerank 重排；
+- SSE 流式回答、Markdown 渲染、会话历史、回答中断与导出；
+- 可信引用、文档页码/原文定位，检索无依据时明确拒答。
+
+后续将接入图片和音视频上传、媒体引用播放、扫描文档 OCR、大文件分片上传及任务 WebSocket 推送。
 
 ## 系统架构
 
 ### 主要模块
 
-| 模块 | 主要职责 | 计划技术方向 |
+| 模块 | 主要职责 | 当前实现 |
 | --- | --- | --- |
-| 前端与交互 | 知识库管理、文件上传、解析进度、对话与引用播放 | React/Vite/TypeScript 或 Vue3/Vite |
+| 前端与交互 | 登录、知识库管理、文件上传、解析进度、对话与引用查看 | Vue 3、Vite、Pinia、Vue Router、JavaScript/TypeScript |
 | 后端 API | 用户、文件、知识库、任务、对话和 Chunk 溯源接口 | FastAPI、分层架构、SSE |
-| 异步任务 | 文档解析、媒体处理、向量化和重试 | Celery + Redis；评估 Dramatiq/arq |
-| 数据处理 | PDF/Word/图片/音视频解析、清洗、切片和多模态对齐 | `ingestion/` 契约层；可接 PyMuPDF、Unstructured、FFmpeg、Whisper、OCR |
-| 向量与检索 | API 多模态 Embedding、向量入库、向量检索、BM25、RRF | Qdrant（优先）或 Milvus；Jina Embeddings API |
-| 生成与评估 | Query 改写、Rerank、Prompt、流式生成、效果评估 | Jina Reranker、可配置的大模型 API |
-| 基础设施 | 关系数据、对象存储、服务编排与部署 | MySQL、MinIO、Docker Compose |
+| 异步任务 | 文档解析、向量化、重试和资源清理 | Celery + Redis |
+| 数据处理 | 文档解析、清洗、切片；图片/音视频适配边界 | `ingestion/`、PyMuPDF、DOCX 解析器；媒体模块提供 FFmpeg/ASR/VLM 适配 |
+| 向量与检索 | API 多模态 Embedding、向量入库、向量检索、BM25、RRF | Qdrant、Jina Embeddings API、`rag_engine/` |
+| 生成与评估 | Rerank、Prompt、流式生成、引用校验、效果评估 | Jina Reranker、OpenAI-compatible 模型 API |
+| 基础设施 | 关系数据、迁移、对象存储、服务编排与部署 | MySQL、SQLAlchemy/Alembic、MinIO、Docker Compose |
 
 ### 数据流与异步任务
 
-上传后的耗时处理不占用同步请求线程，由任务队列分流：
-
-- `queue_document`：PDF、Word 等文档解析；
-- `queue_media`：音频转写、视频抽帧和媒体处理；
-- `queue_vectorize`：Embedding 生成与向量入库。
+上传接口保存原文件到 MinIO、写入 MySQL 并返回文档及任务信息。Celery 在
+`mmrag.documents` 队列中执行解析、切片、Embedding 和 Qdrant 入库；队列前缀可由
+`CELERY_QUEUE_PREFIX` 配置。当前资源清理任务也使用该队列，媒体任务拆分留待后续接入。
 
 统一任务状态机为：
 
@@ -51,7 +51,8 @@ PENDING → PROCESSING → SUCCESS
                     ↘ FAILED（可重试）
 ```
 
-处理中可进一步报告 `PARSING`、`SLICING`、`EMBEDDING` 和 `INDEXING` 子状态，并将进度、失败原因和重试次数提供给前端。
+处理中通过 `sub_status` 报告 `PARSING`、`SLICING`、`EMBEDDING` 和 `INDEXING`，
+前端轮询获取进度、失败阶段及重试次数。临时故障有限重试，终止失败后可重新解析。
 
 ## Chunk 数据契约
 
@@ -85,58 +86,104 @@ Chunk 是数据处理、检索算法和前端溯源之间的核心接口。各�
 }
 ```
 
-## 计划 API
+## 主要 API
 
 | 能力 | 接口 | 说明 |
 | --- | --- | --- |
-| 文件上传 | `POST /api/files/upload` | 分片上传并返回任务 ID |
-| 知识库管理 | `GET/POST/DELETE /api/knowledge/*` | 文件列表、详情、删除和重新解析 |
-| 任务状态 | `GET /api/tasks/{id}`、`WS /api/tasks/ws` | 查询或推送解析进度 |
+| 用户认证 | `POST /api/auth/register`、`POST /api/auth/verify-registration`、`POST /api/auth/login` | 邮箱验证码注册与登录 |
+| 文件上传 | `POST /api/files/upload`、`POST /api/files/upload_url` | 普通文件上传或 arXiv/PDF 链接导入，返回文档及任务信息 |
+| 知识库管理 | `GET/POST /api/knowledge`、`GET/PATCH/DELETE /api/knowledge/{kb_id}` | 知识库列表、详情、修改与删除 |
+| 知识库文件 | `GET/POST /api/knowledge/{kb_id}/files` | 查询文件或关联已上传文件 |
+| 任务状态 | `GET /api/tasks/{id}`、`GET /api/files/{doc_id}/status` | 轮询解析进度与失败原因 |
+| 重新解析 | `POST /api/files/{doc_id}/reparse` | 创建新一轮解析任务 |
 | 对话问答 | `POST /api/chat` | 发起支持 SSE 流式返回的对话 |
-| 历史记录 | `GET /api/chat/history` | 查询会话和消息历史 |
-| 引用溯源 | `GET /api/chunks/{id}` | 获取 Chunk 原文和元数据 |
+| 历史记录 | `GET /api/chat/history`、`GET /api/chat/sessions/{session_id}/messages` | 查询会话和消息历史 |
+| 引用溯源 | `GET /api/chunks/{id}`、`GET /api/chunks/{id}/source` | 获取可信 Chunk、来源正文与定位信息 |
 
-SSE 事件应能够表达增量文本、引用标记、图片和视频片段等结构化内容；需要双向通信时再引入 WebSocket。
+网页 SSE 使用 `start`、`stage`、`answer_chunk`、`citation`、`done`、`aborted` 和
+`error` 事件，由后端转换 C 的内部事件。完整接口以 FastAPI `/docs` 为准。
 
 ## 角色与交付物
 
 | 负责人 | 角色 | 主要交付物 |
 | --- | --- | --- |
-| 成员 A | 全栈工程师 | 前端、FastAPI 后端、异步任务、MySQL 脚本、Docker Compose、全链路联调 |
+| 成员 A | 全栈工程师 | Vue 前端、FastAPI 后端、Celery 任务、MySQL 迁移、开发脚本、Docker Compose、全链路联调 |
 | 成员 B | 多模态数据工程师 | 文档/媒体解析、对齐融合、切片与元数据规范、Embedding 入库、质量样例集 |
 | 成员 C | AI 与 RAG 算法工程师 | 混合检索、Rerank、Prompt 模板、大模型适配、引用输出、评估脚本与报告 |
 
-协作以接口和数据契约为边界：先冻结 Chunk 格式、任务状态机、向量库返回结构及对象存储路径约定，再并行开发内部实现。
+协作以统一 Chunk、任务状态、向量库 payload 和对象存储路径为边界；A 负责应用层接入、权限隔离及持久化，B/C 负责数据处理和算法实现。
 
-## 基础设施规划
+## 基础设施与快速启动
 
-计划使用 Docker Compose 编排以下服务：
+`compose.yaml` 已提供完整应用与基础设施编排：
 
 ```text
-frontend · backend · mysql · redis · minio · qdrant
-celery-worker · celery-beat（按需启用）
+frontend · backend · worker · bootstrap · mysql57 · redis · minio · qdrant
 ```
 
-原始文件和中间产物存放于 MinIO，建议划分以下存储桶：
+MySQL 保存用户、文件、知识库、任务、会话、消息和 Chunk 元数据；MinIO 的
+`raw-files` 桶保存原始文件，Qdrant 保存向量及 Chunk payload。
+`bootstrap` 负责 Alembic 迁移和存储桶初始化。
 
-- `raw-files`：原始文件；
-- `extracted-frames`：视频抽帧；
-- `transcripts`：音频/视频转写文本；
-- `thumbnails`：封面和缩略图。
+**Windows本地开发**需要 Docker Desktop、Python 3.11+ 的 Conda 环境（默认名为 `rag`）和
+Node.js 20.19+ 或 22.12+。首次安装与配置：
 
-数据库将重点管理用户、文件元数据、任务、会话、消息和引用映射；向量库负责向量及可过滤的 Chunk payload。
+```powershell
+conda activate rag
+python -m pip install -e '.[app]'
+Set-Location frontend
+npm.cmd ci
+Set-Location ..
+.\start-dev.ps1 -CheckOnly
+.\start-dev.ps1
+```
+
+已有 `.env` 时保留原配置。启动前填写 Jina 和问答模型密钥、MySQL/MinIO 凭据、
+SMTP 发信配置及应用地址；最小配置见 [`docs/member-a-fullstack.md`](./docs/member-a-fullstack.md)。
+然后在项目根目录运行：
+
+```powershell
+.\start-dev.ps1 -CheckOnly
+.\start-dev.ps1
+```
+
+脚本启动四个基础设施容器及本地 API、Vite、Worker。默认前端地址为
+`http://127.0.0.1:5174`，API 文档为 `http://127.0.0.1:8001/docs`。
+
+**完整容器部署**使用：
+
+```powershell
+.\start-dev.ps1 -StopApps
+docker compose up -d --build
+docker compose ps --all
+```
+
+从本地开发切换时先执行
+`.\start-dev.ps1 -StopApps`，避免端口冲突。
 
 ## 开发里程碑
 
 1. **M1：契约冻结** —— 确定 Chunk 格式、任务状态机、向量库和集合设计。
-2. **M2：最小闭环** —— 完成“PDF 上传 → 解析切片 → 向量化 → 文本检索问答 → 前端展示”。
-3. **M3：多模态能力** —— 接入视频/音频解析、多模态对齐和图片检索。
-4. **M4：质量优化** —— 加入混合检索、Rerank、评估集和回归测试。
-5. **M5：部署交付** —— Docker Compose 一键部署并完成全链路验收。
+2. **M2：最小闭环** —— 文档上传、解析入库、检索问答和前端展示已接入，待真实环境验收。
+3. **M3：多模态能力** —— 数据适配边界已提供，继续接入图片/音视频网页流程与播放。
+4. **M4：质量优化** —— 混合检索、Rerank 和评估基线已实现，继续补充真实语料回归。
+5. **M5：部署交付** —— 已提供 Docker Compose 与开发脚本，待目标环境全链路验收。
 
 ## 评估指标
 
 项目将覆盖检索准确率（Precision）、召回率（Recall）、命中率（Hit Rate）、回答忠实度（Faithfulness）和引用准确率等指标。评估集计划覆盖文本、图片、视频及混合问题，并记录标准答案与期望引用来源。
+
+## 成员 A 全栈模块
+
+成员 A 的实现位于 `backend/` 和 `frontend/`：
+
+- Vue 3 工作台提供认证、知识库、上传进度、对话历史和引用原文查看；
+- FastAPI 按认证、文件、知识库、任务、对话和模型状态划分业务模块；
+- Celery 接入 B 的解析与入库能力，应用层接入 C 的混合检索、重排及流式生成；
+- SQLAlchemy/Alembic、MinIO 和 Qdrant 分别管理关系数据、原始文件和向量；
+- `start-dev.ps1` 与 `compose.yaml` 提供本地开发和完整容器部署入口。
+
+接入边界、配置示例和当前限制见 [`docs/member-a-fullstack.md`](./docs/member-a-fullstack.md)。
 
 ## 成员 C 算法模块
 
@@ -195,3 +242,7 @@ Chunk 可直接被 C 的 BM25/混合检索和 `QdrantVectorRetriever` 消费。
 ## 文档
 
 - [项目分工详细说明书](./项目分工详细说明书.md)：角色职责、接口边界、技术选型和交付物的完整说明。
+- [成员 A：全栈实现与接入](./docs/member-a-fullstack.md)：前后端、任务、配置与启动方式。
+- [成员 B：数据处理](./docs/member-b-data.md)：解析、切片、媒体对齐和向量入库。
+- [成员 C：RAG 算法](./docs/member-c-rag.md)：检索、重排、生成、引用和评估。
+- [Embedding 模型选型](./docs/embedding-model-selection.md)：Jina 模型与输入路由约定。

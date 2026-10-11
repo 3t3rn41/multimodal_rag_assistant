@@ -1,0 +1,20 @@
+/* AI knowledge workspace. Light theme is explicitly selected by the product brief. */
+:root {
+ color-scheme: light;
+ --bg:#f7f7f4; --surface:#ffffff; --surface-warm:#f0f1ee;
+ --ink:#242622; --ink-soft:#484c44; --ink-mute:#62665e; --ink-faint:#686f63;
+ --line:#dddfd8; --line-soft:#eceee8;
+ --accent:#b95838; --accent-solid:#b95838; --accent-hover:#984329;
+ --accent-ink:#984329; --accent-soft:#f8eee8; --on-accent:#ffffff;
+ --panel-line:#dddfd8;
+ --ok:#38654a; --ok-soft:#edf4ee; --warn:#80611d; --warn-soft:#faf4e5; --err:#a03932; --err-soft:#fbefed;
+ --font-sans:'Segoe UI','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+ --font-mono:'Cascadia Code','SFMono-Regular',Consolas,monospace;
+ --text-sm:13px; --text-base:14px; --text-md:16px;
+ --radius:9px; --radius-lg:12px; --radius-composer:16px;
+ --nav-w:256px; --nav-w-collapsed:72px; --topbar-h:64px;
+ --t-fast:150ms; --ease:cubic-bezier(.2,0,0,1);
+ --shadow-mock:0 8px 28px -18px rgb(36 38 34 / .2);
+ /* Layer scale: sidebar 20, scrim 30, Sources 40, dialogs 60, toast 80. */
+ --z-sidebar:20; --z-scrim:30; --z-sources:40; --z-dialog:60; --z-toast:80;
+}
